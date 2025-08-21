@@ -1,9 +1,9 @@
 name: Daily Crypto Pipeline
 
 on:
-  workflow_dispatch:      # handmatig starten
+  workflow_dispatch:
   schedule:
-    - cron: "0 8 * * *"   # elke dag 08:00 UTC
+    - cron: "15 6 * * *"   # elke dag 06:15 UTC
 
 jobs:
   run-pipeline:
@@ -17,11 +17,24 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies (best effort)
-        run: |
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
       - name: Run pipeline
-        run: |
-          python run.py
+        run: python run.py
 
+      - name: Upload reports as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: crypto-reports
+          path: |
+            data/reports/latest.csv
+            data/reports/latest.json
+
+      - name: Commit reports back to repo
+        run: |
+          git config user.name "pipeline-bot"
+          git config user.email "bot@example.com"
+          git add data/reports/*.csv data/reports/*.json || true
+          git commit -m "daily scorecard" || echo "no changes"
+          git push
