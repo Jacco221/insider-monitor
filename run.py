@@ -1,9 +1,13 @@
 from pathlib import Path
+import time
 import pandas as pd
 from src.universe import get_top_coins
 from src.ta import ta_indicators, weighted_group_score
 
-TEST_LIMIT = 20   # <<< eerst snel testen; later 100 maken
+TEST_LIMIT = 20         # eerst testen; straks 100
+SLEEP_PER_COIN = 1.2    # ~50 calls / minuut
+BATCH_SIZE = 20
+SLEEP_PER_BATCH = 20.0  # extra adempauze
 
 def pct_from_group(avg_m1_to_p1: float) -> float:
     return max(0.0, min(100.0, (avg_m1_to_p1 + 1.0) * 50.0))
@@ -27,6 +31,12 @@ def main():
             "TA_%": round(ta_pct, 1),
             "AvgDataAge_h": round(float(avg_age) if pd.notna(avg_age) else 0.0, 1)
         })
+
+        # kleine pauze om 429 te voorkomen
+        time.sleep(SLEEP_PER_COIN)
+        if i % BATCH_SIZE == 0 and i < len(coins):
+            print(f"  - batchpauze {SLEEP_PER_BATCH}s", flush=True)
+            time.sleep(SLEEP_PER_BATCH)
 
     df = pd.DataFrame(rows).sort_values("TA_%", ascending=False)
     outdir = Path("data/reports"); outdir.mkdir(parents=True, exist_ok=True)

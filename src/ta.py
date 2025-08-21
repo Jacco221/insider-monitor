@@ -2,7 +2,7 @@ from src.utils import get
 import pandas as pd
 from datetime import datetime, timezone
 
-def _klines_coingecko(cg_id:str, days=365):
+def _klines_coingecko(cg_id:str, days=180):
     """Dagelijkse prijs/volume via CoinGecko market_chart (1 call per coin)."""
     data = get(f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart",
                params={"vs_currency":"usd","days":days,"interval":"daily"})
