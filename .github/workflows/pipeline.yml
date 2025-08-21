@@ -1,5 +1,9 @@
 name: Daily Crypto Pipeline
 
+# ★ Geef de workflow schrijfrechten op repo-inhoud
+permissions:
+  contents: write
+
 on:
   workflow_dispatch:
   schedule:
@@ -9,8 +13,11 @@ jobs:
   run-pipeline:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
+      - name: Checkout repo (with token)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # nodig om te kunnen committen/pushen
+          persist-credentials: true  # gebruikt automatisch GITHUB_TOKEN
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -33,8 +40,10 @@ jobs:
 
       - name: Commit reports back to repo
         run: |
-          git config user.name "pipeline-bot"
-          git config user.email "bot@example.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/reports/*.csv data/reports/*.json || true
           git commit -m "daily scorecard" || echo "no changes"
-          git push
+          # kleine veiligheidsmarge tegen race-conflict
+          git pull --rebase
+          git push origin HEAD:main
