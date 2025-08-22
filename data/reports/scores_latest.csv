@@ -1,12 +1,12 @@
 symbol,name,ta_ma,ta_volume,ta_funding,TA_%,AvgDataAge_h
-WBTC,Wrapped Bitcoin,1,1,0,92.9,0.0
-ADA,Cardano,1,1,0,92.9,0.0
 LINK,Chainlink,1,1,0,92.9,0.0
-BNB,BNB,1,1,0,92.9,0.0
-ETH,Ethereum,1,0,0,71.4,0.0
-USDT,Tether,1,-1,0,50.0,0.0
+ADA,Cardano,1,1,0,92.9,0.0
+WBTC,Wrapped Bitcoin,1,0,0,71.4,0.0
 BTC,Bitcoin,1,-1,0,50.0,0.0
+USDT,Tether,1,-1,0,50.0,0.0
 XRP,XRP,1,-1,0,50.0,0.0
+ETH,Ethereum,1,-1,0,50.0,0.0
+BNB,BNB,1,-1,0,50.0,0.0
 DOGE,Dogecoin,1,-1,0,50.0,0.0
 STETH,Lido Staked Ether,1,-1,0,50.0,0.0
 TRX,TRON,1,-1,0,50.0,0.0
