@@ -65,8 +65,31 @@ def ta_indicators(symbol:str, cg_id:str):
 
     return scores, ages, w
 
-def weighted_group_score(scores: dict, weights: dict) -> float:
-    """Gemiddelde (-1..+1) met tijdsgewichten."""
-    num = sum(scores[k]*weights.get(k,1.0) for k in scores)
-    den = sum(weights.get(k,1.0) for k in scores)
-    return 0.0 if den == 0 else num/den
+def weighted_group_score(
+    scores: dict[str, float],
+    weights: dict[str, float],
+    age_weights: dict[str, float] | None = None
+) -> float:
+    """
+    Gemiddelde score met gewichten.
+
+    - scores: dict met indicator → score (-1, 0, +1)
+    - weights: dict met indicator → gewicht (bijv. 0.2, 0.4, …)
+    - age_weights: optioneel dict met indicator → tijdsgewicht (bijv. 0.5…3.0)
+
+    Formule: som( score[k] * weight[k] * age_weight[k] ) / som(weight[k] * age_weight[k])
+    Ontbrekende scores worden overgeslagen.
+    """
+    num = 0.0
+    den = 0.0
+    for k, s in scores.items():
+        w = weights.get(k, 0.0)
+        if w == 0.0:
+            continue
+        t = 1.0
+        if age_weights is not None:
+            t = age_weights.get(k, 1.0)
+        num += float(s) * float(w) * float(t)
+        den += float(w) * float(t)
+    return num / den if den > 0 else 0.0
+
