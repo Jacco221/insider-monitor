@@ -1,3 +1,20 @@
+          path: |
+            data/reports/latest.csv
+            data/reports/latest.json
+            data/reports/scores_latest.csv
+            data/reports/scores_latest.json
+            data/reports/top5_latest.md
+
+      - name: Commit reports back to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # eerst rebase om conflicts te voorkomen
+          git pull --rebase
+          # force add omdat .gitignore *.csv/json negeert
+          git add -f data/reports/*.csv data/reports/*.json data/reports/*.md || true
+          git commit -m "daily scorecard" || echo "no changes"
+          git push origin HEAD:main
 name: Daily Crypto Pipeline
 
 # ★ Geef de workflow schrijfrechten op repo-inhoud
