@@ -30,8 +30,17 @@ jobs:
       - name: Run pipeline
         run: python run.py
 
+      - name: Archive reports (date-stamped)
+        run: bash scripts/archive_reports.sh
       - name: Upload reports as artifact
         uses: actions/upload-artifact@v4
         with:
           name: crypto-reports
+          path: |
+            data/reports/latest.csv
+            data/reports/latest.json
+            data/reports/scores_latest.csv
+            data/reports/scores_latest.json
+            data/reports/top5_latest.md
+            data/reports/history/
 
