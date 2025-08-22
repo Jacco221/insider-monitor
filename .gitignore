@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Python venv
+.venv/
+
+# Editor/backup
+*.save
+
+# Onze pipeline artefacten
+data/reports/*.csv
+data/reports/*.json
