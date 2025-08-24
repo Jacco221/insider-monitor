@@ -1,46 +1,86 @@
 name: Daily Crypto Pipeline
 
-# ★ Geef de workflow schrijfrechten op repo-inhoud
+on:
+  schedule:
+    - cron: "5 6 * * *"   # Dagelijks 06:05 UTC; pas aan naar wens
+  workflow_dispatch: {}
+
+# 'write' is nodig voor de optionele commit-stap naar de 'reports' branch
 permissions:
   contents: write
 
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: "15 6 * * *"   # elke dag 06:15 UTC
-
 jobs:
-  run-pipeline:
+  run:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repo (with token)
+      - name: Checkout repository
+      # fetch-depth: 0 zodat we kunnen pushen naar een branch
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0          # nodig om te kunnen committen/pushen
-          persist-credentials: true  # gebruikt automatisch GITHUB_TOKEN
+          fetch-depth: 0
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Run pipeline
-        run: python run.py
+      - name: Run pipeline (maakt CSV's in data/reports)
+        run: |
+          python -m src.run --limit 50 --reports-dir data/reports
+          echo "---- Listing data/reports ----"
+          ls -lah data/reports || true
 
-      - name: Archive reports (date-stamped)
-        run: bash scripts/archive_reports.sh
+      # ===== Artifact upload (altijd aan) =====
       - name: Upload reports as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: crypto-reports
+          name: reports
           path: |
-            data/reports/latest.csv
-            data/reports/latest.json
-            data/reports/scores_latest.csv
-            data/reports/scores_latest.json
-            data/reports/top5_latest.md
-            data/reports/history/
+            data/reports/report_*.csv
+            data/reports/top5_latest.csv
+
+      # ===== (Optioneel) Commit & push alléén top5_latest.csv naar branch 'reports' =====
+      # Zet 'if: false' als je dit niet wilt
+      - name: Commit top5_latest.csv to 'reports' branch
+        if: always()    # laat aan staan; zet naar 'if: false' om uit te zetten
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Bewaar top5 tijdelijk voordat we van branch wisselen
+          mkdir -p /tmp/reports
+          cp -f data/reports/top5_latest.csv /tmp/reports/top5_latest.csv
+
+          # Configureer git bot user
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Haal bestaande 'reports' branch op (als die bestaat)
+          git fetch origin reports || true
+
+          # Schakel over naar 'reports' branch (maak aan als nodig)
+          if git show-ref --verify --quiet refs/remotes/origin/reports; then
+            git checkout -B reports origin/reports
+          else
+            git checkout -b reports
+          fi
+
+          # Zet het bestand op de juiste plek en commit alleen dat bestand
+          mkdir -p data/reports
+          mv -f /tmp/reports/top5_latest.csv data/reports/top5_latest.csv
+          git add data/reports/top5_latest.csv
+
+          # Commit alleen als er wijzigingen zijn
+          if git diff --cached --quiet; then
+            echo "No changes in top5_latest.csv; skipping commit."
+          else
+            git commit -m "Update top5_latest.csv ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+            git push origin reports
+          fi
 
