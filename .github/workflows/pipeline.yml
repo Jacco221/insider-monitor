@@ -1,9 +1,9 @@
 name: Daily Crypto Pipeline
 
 on:
+  workflow_dispatch: {}
   schedule:
     - cron: "5 6 * * *"   # Dagelijks 06:05 UTC
-  workflow_dispatch: {}
 
 permissions:
   contents: write   # nodig voor de optionele commit-stap
@@ -67,54 +67,21 @@ jobs:
             exit 0
           fi
           mkdir -p /tmp/reports
-          cp -f data/reports/top5_latest.csv /tmp/reports/top5_la
-git add .github/workflows/pipeline.yml
-git commit -m "Align workflow to actual outputs + build top5_latest.csv"
-git push origin main
-nano .github/workflows/pipeline.yml
-# 2) Check of de CSV's er zijncd ~/Crypto-pipeline
-
-cat > .github/workflows/pipeline.yml <<'YAML'
-name: Daily Crypto Pipeline
-
-on:
-  schedule:
-    - cron: "5 6 * * *"   # Dagelijks 06:05 UTC
-  workflow_dispatch: {}
-
-permissions:
-  contents: write   # nodig voor de optionele commit-stap
-
-jobs:
-  run:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Run pipeline (maakt CSV's in data/reports)
-        run: |
-          python3 run.py --limit 50 --reports-dir data/reports
-          echo "---- Listing data/reports ----"
-          ls -lah data/reports || true
-
-      - name: Build top5_latest.csv from scores_latest.csv
-        run: |
-          python3 - <<'PY'
-          import csv
-          rows=list(csv.reader(open('data/reports/scores_latest.csv', newline='')))
-          top=[rows[0]]+rows[1:6]
-          with open('data/reports/top5_latest.csv','w',n_
-python3 --version
+          cp -f data/reports/top5_latest.csv /tmp/reports/top5_latest.csv
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin reports || true
+          if git show-ref --verify --quiet refs/remotes/origin/reports; then
+            git checkout -B reports origin/reports
+          else
+            git checkout -b reports
+          fi
+          mkdir -p data/reports
+          mv -f /tmp/reports/top5_latest.csv data/reports/top5_latest.csv
+          git add data/reports/top5_latest.csv
+          if git diff --cached --quiet; then
+            echo "No changes; skip commit."
+          else
+            git commit -m "Update top5_latest.csv ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+            git push origin reports
+          fi
