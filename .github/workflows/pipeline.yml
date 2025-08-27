@@ -43,6 +43,9 @@ jobs:
               csv.writer(f).writerows(top)
           print("Wrote data/reports/top5_latest.csv")
           PY
+    - name: Annotate top5 with market regime & advice
+      run: |
+        python3 scripts/annotate_market_regime.py data/reports/top5_latest.md
 
       - name: Upload reports as artifact
         uses: actions/upload-artifact@v4
