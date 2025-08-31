@@ -1,0 +1,6 @@
+symbol,name,ta_ma,ta_volume,ta_funding,TA_%,Macro_%,RS_%,Total_%,AvgDataAge_h
+SOL,Solana,1,1,0,97.4,50.0,100.0,88.4,0.0
+HYPE,Hyperliquid,1,1,0,97.4,50.0,100.0,88.4,0.0
+WEETH,Wrapped eETH,1,1,0,97.4,50.0,100.0,88.4,0.0
+LINK,Chainlink,1,1,0,97.4,50.0,100.0,88.4,0.0
+BTC,Bitcoin,1,1,0,97.4,50.0,50.0,78.4,0.0

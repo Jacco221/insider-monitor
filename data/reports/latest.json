@@ -1,1 +1,15 @@
-[{"symbol":"BTC","price_usd":113473.0,"source":"coingecko"}]
+[
+  {
+    "symbol": "HYPE",
+    "name": "Hyperliquid",
+    "ta_ma": 1,
+    "ta_volume": 1,
+    "ta_funding": 0,
+    "TA_%": 97.4,
+    "Macro_%": 50.0,
+    "RS_%": 100.0,
+    "Total_%": 88.4,
+    "AvgDataAge_h": 0.0,
+    "score": 0.884
+  }
+]

@@ -1,2 +1,2 @@
-symbol,price_usd,source
-BTC,113473.0,coingecko
+symbol,name,ta_ma,ta_volume,ta_funding,TA_%,Macro_%,RS_%,Total_%,AvgDataAge_h,score
+HYPE,Hyperliquid,1,1,0,97.4,50.0,100.0,88.4,0.0,0.884
