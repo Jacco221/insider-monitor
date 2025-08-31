@@ -3,12 +3,16 @@ name: Daily Crypto Pipeline
 on:
   workflow_dispatch: {}
   schedule:
-    # draai 06:05 en 06:15 UTC (failsafe), evt. later aanpassen
-    - cron: "5 6 * * *"
-    - cron: "15 6 * * *"
+    - cron: "5 6 * * *"     # Dagelijks 06:05 UTC (08:05 NL-tijd zomer)
+    - cron: "15 6 * * *"    # optioneel 06:15 UTC tweede poging
 
 permissions:
-  contents: write   # nodig voor de optionele commit-stap
+  contents: write
+
+env:
+  PYTHONUNBUFFERED: "1"
+  COOL_DOWN_DAYS: "2.0"     # koeltijd in dagen
+  BIG_ADV_PCT:   "5.0"      # voordeel (%) om koeltijd te mogen overriden
 
 jobs:
   run:
@@ -29,41 +33,44 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ===== 1) Pipeline draaien: maakt CSV/JSON in data/reports =====
       - name: Run pipeline (maakt CSV's in data/reports)
         run: |
           python3 run.py --limit 50 --reports-dir data/reports
           echo "---- Listing data/reports ----"
           ls -lah data/reports || true
 
-      # ===== 2) top5_latest.csv opbouwen uit scores_latest.csv =====
       - name: Build top5_latest.csv from scores_latest.csv
         run: |
           python3 - <<'PY'
           import csv
           rows = list(csv.reader(open('data/reports/scores_latest.csv', newline='')))
-          top  = [rows[0]] + rows[1:6]
-          with open('data/reports/top5_latest.csv','w', newline='') as f:
+          top = [rows[0]] + rows[1:6]
+          with open('data/reports/top5_latest.csv', 'w', newline='') as f:
               csv.writer(f).writerows(top)
           print("Wrote data/reports/top5_latest.csv")
           PY
 
-      # ===== 3) Marktrend + advies annotatie =====
       - name: Annotate top5 with market regime & advice
         run: |
           python3 scripts/annotate_market_regime.py data/reports/top5_latest.md
 
-      # ===== 4) NIEUW: Diversify guard (allocatie-advies) =====
-      # Schrijft achteraan in top5_latest.md een allocatie-regel,
-      # bv. "Allocatie: SINGLE → HYPE 100%" of "Allocatie: DIVERSIFY → ETH 50% + HYPE 50%"
-      - name: Advise allocation (diversify guard)
+      # ===== NIEUW: cooldown-check =====
+      - name: Cooldown guard (blokkeer te snelle wissel → voeg notitie toe)
         run: |
-          python3 scripts/advise_allocation.py \
-            --gap 2.0 \
-            --split 0.5 \
-            --append-md
+          mkdir -p data/state
+          set -e
+          # Probeer guard; mislukt (=cooldown blokkeert), dan noteer dat in het rapport en ga door
+          python3 scripts/cooldown_guard.py \
+            --md data/reports/top5_latest.md \
+            --state data/state/last_switch.json \
+            --cooldown-days ${COOL_DOWN_DAYS} \
+            --big-advantage ${BIG_ADV_PCT} \
+          || {
+            echo "" >> data/reports/top5_latest.md
+            echo "### Cooldown" >> data/reports/top5_latest.md
+            echo "> ⚠️ Wissel geblokkeerd door cooldown van ${COOL_DOWN_DAYS} dagen (override bij ≥ ${BIG_ADV_PCT}% voordeel)." >> data/reports/top5_latest.md
+          }
 
-      # ===== 5) Upload rapporten als artifact =====
       - name: Upload reports as artifact
         uses: actions/upload-artifact@v4
         with:
@@ -76,8 +83,7 @@ jobs:
             data/reports/top5_latest.md
             data/reports/top5_latest.csv
 
-      # ===== 6) Optioneel: commit alleen top5_latest.csv naar branch 'reports' =====
-      # Zet 'if:' op true als je dit wél wilt
+      # ===== Optioneel: commit alleen top5_latest.csv naar branch 'reports' =====
       - name: Commit top5_latest.csv to 'reports' branch
         if: always() && false
         shell: bash
@@ -88,15 +94,13 @@ jobs:
             exit 0
           fi
 
-          TMP=/tmp/reports
+          TMP="/tmp/reports"
           rm -rf "$TMP" && mkdir -p "$TMP"
           cp -f data/reports/top5_latest.csv "$TMP/top5_latest.csv"
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # fetch/checkout met robuuste flow
-          git fetch origin reports || true
           if git show-ref --verify --quiet refs/remotes/origin/reports; then
             git checkout -B reports origin/reports
           else
