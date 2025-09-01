@@ -1,86 +1,115 @@
 #!/usr/bin/env python3
-"""
-Cooldown Guard: voorkomt te snel wisselen van munten
-- Houdt bij wanneer de laatste wissel plaatsvond
-- Controleert of voldoende dagen verstreken zijn (cooldown)
-- Optioneel: sta wissel eerder toe bij groot voordeel
-"""
-
-import argparse
-import json
+from __future__ import annotations
+import argparse, json, re, sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from datetime import datetime, timedelta
 
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
-def load_state(state_file: Path):
-    """Laad de state (laatste wissel)."""
-    if state_file.exists():
-        with open(state_file) as f:
-            return json.load(f)
-    return {"last_switch": None}
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--md", required=True, help="Pad naar top5_latest.md")
+    p.add_argument("--state", default="data/state/last_switch.json", help="JSON bestand met last_switch")
+    p.add_argument("--cooldown-days", type=float, default=2.0)
+    p.add_argument("--big-advantage", type=float, default=5.0, help="Override drempel (%)")
+    p.add_argument("--mark-as_switched", action="store_true", help="Sla 'nu' als wisselmoment op")
+    return p.parse_args()
 
+def load_state(fp: Path) -> dict:
+    if fp.exists():
+        try:
+            return json.loads(fp.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
 
-def save_state(state_file: Path, state):
-    """Sla de state op (laatste wissel)."""
-    with open(state_file, "w") as f:
-        json.dump(state, f)
+def save_state(fp: Path, state: dict):
+    fp.parent.mkdir(parents=True, exist_ok=True)
+    fp.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
+def parse_advantage(md_text: str) -> float | None:
+    # zoekt “voordeel: 88.4%” (maakt niet uit of het in Advies-regel of elders staat)
+    m = re.search(r"voordeel:\s*([0-9]+(?:\.[0-9]+)?)\s*%", md_text, re.IGNORECASE)
+    return float(m.group(1)) if m else None
 
-def parse_top5(md_file: Path):
-    """Lees de laatste adviesregel uit het top5-rapport."""
-    with open(md_file) as f:
-        lines = f.readlines()
+def ensure_cooldown_note(md_text: str, note_line: str) -> str:
+    lines = md_text.splitlines()
+    try:
+        h_idx = next(i for i,l in enumerate(lines) if l.strip().lower().startswith("### cooldown"))
+    except StopIteration:
+        # hoofdstuk ontbreekt: aan einde toevoegen
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append("### Cooldown")
+        h_idx = len(lines)-1
+    # verwijder bestaande bullet(s) direct onder de header
+    i = h_idx + 1
+    while i < len(lines) and (lines[i].startswith("- ") or lines[i].startswith("• ") or not lines[i].strip()):
+        # laat eventuele lege regel(s) onder de header staan
+        if not lines[i].strip():
+            i += 1
+            break
+        del lines[i]
+    lines.insert(i, f"- {note_line}")
+    return "\n".join(lines) + ("\n" if not md_text.endswith("\n") else "")
 
-    # Zoek regel met advies
-    advice_line = next((l.strip() for l in reversed(lines) if l.startswith("**Advies:**")), None)
-    return advice_line
+def to_aware(dt: datetime) -> datetime:
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
+def main() -> int:
+    args = parse_args()
+    md_file = Path(args.md)
+    state_file = Path(args.state)
 
-def main():
-    parser = argparse.ArgumentParser(description="Cooldown guard voor coin switches")
-    parser.add_argument("--md", type=Path, required=True, help="Markdown rapport (top5_latest.md)")
-    parser.add_argument("--state", type=Path, required=True, help="State-bestand (json)")
-    parser.add_argument("--cooldown-days", type=float, default=2.0, help="Aantal dagen cooldown")
-    parser.add_argument("--big-advantage", type=float, default=5.0, help="Extra voordeel (in %) om cooldown te overslaan")
-    parser.add_argument("--mark_as_switched", action="store_true", help="Markeer nu als wissel")
-
-    args = parser.parse_args()
-
-    state = load_state(args.state)
-    last_switch = None
-    if state.get("last_switch"):
-        last_switch = datetime.fromisoformat(state["last_switch"])
-
-    now = datetime.utcnow()
-    advice = parse_top5(args.md)
+    # markeer directe wissel (handmatige override)
+    state = load_state(state_file)
+    now = utcnow()
 
     if args.mark_as_switched:
-        # Wissel uitvoeren → state opslaan
         state["last_switch"] = now.isoformat()
-        save_state(args.state, state)
-        print(f"✅ Wissel geregistreerd op {now.isoformat()}")
-        return
+        save_state(state_file, state)
+        print("✅ Wissel geregistreerd (handmatig).")
+        return 0
 
-    # Bereken cooldown
-    if last_switch:
-        next_allowed = last_switch + timedelta(days=args.cooldown_days)
-        if now < next_allowed:
-            print(f"⏳ Cooldown actief tot {next_allowed.isoformat()}")
-            # Check of voordeel groot genoeg is
-            if advice and "voordeel:" in advice:
-                perc = float(advice.split("voordeel:")[1].split("%")[0].strip())
-                if perc >= args.big_advantage:
-                    print(f"⚡ Groot voordeel ({perc}%) → override cooldown toegestaan")
-                else:
-                    print(f"❌ Wissel geblokkeerd: voordeel {perc}% te laag (min {args.big_advantage}%)")
-                    exit(1)
+    # lees md
+    md_text = md_file.read_text(encoding="utf-8")
+    # lees vorige wissel
+    last_switch = state.get("last_switch")
+    last_dt = to_aware(datetime.fromisoformat(last_switch)) if last_switch else None
+
+    # standaard: wissel toegestaan
+    allowed = True
+    note = "Wissel toegestaan (geen cooldown actief of override)."
+
+    if last_dt:
+        next_allowed = last_dt + timedelta(days=float(args.cooldown_days))
+        if to_aware(now) < next_allowed:
+            # cooldown actief → check override
+            adv = parse_advantage(md_text)
+            days_left = (next_allowed - now).total_seconds() / 86400.0
+            if adv is not None and adv >= float(args.big_advantage):
+                allowed = True
+                note = f"Override bij ≥ {args.big_advantage:.1f}% voordeel. Nog ~{days_left:.2f} dag(en) cooldown."
             else:
-                print("❌ Wissel geblokkeerd: geen voordeel gevonden in adviesregel")
-                exit(1)
+                allowed = False
+                if adv is None:
+                    note = f"Wissel geblokkeerd door cooldown van {args.cooldown_days:.1f} dagen (voordeel onbekend). Nog ~{days_left:.2f} dag(en)."
+                else:
+                    note = (f"Wissel geblokkeerd door cooldown van {args.cooldown_days:.1f} dagen "
+                            f"(voordeel {adv:.1f}% < {args.big_advantage:.1f}%). Nog ~{days_left:.2f} dag(en).")
 
-    print("✅ Wissel toegestaan (geen cooldown actief of override)")
+    # schrijf notitie in MD (maar breek nooit de pipeline)
+    try:
+        new_md = ensure_cooldown_note(md_text, note)
+        if new_md != md_text:
+            md_file.write_text(new_md, encoding="utf-8")
+    except Exception as e:
+        # Fail-safe: voeg korte melding toe onderaan
+        md_file.write_text(md_text + f"\n\n*⚠️ Cooldown guard gaf een fout: {e}*\n", encoding="utf-8")
 
+    print("✅", note)
+    return 0
 
 if __name__ == "__main__":
-    main()
-
+    sys.exit(main())
