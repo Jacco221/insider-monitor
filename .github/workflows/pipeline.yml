@@ -1,80 +1,164 @@
 name: Daily Crypto Pipeline
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
   schedule:
-    # 06:00 Europe/Amsterdam (≈ 04:00 UTC in zomertijd)
-    - cron: "0 4 * * *"
+    # Dagelijks 06:10 UTC
+    - cron: "10 6 * * *"
+
+permissions:
+  contents: write   # nodig voor optionele commit-stap
 
 concurrency:
-  group: daily-pipeline
+  group: crypto-pipeline
   cancel-in-progress: false
 
 jobs:
   build-and-report:
     runs-on: ubuntu-latest
-    env:
-      PYTHONUNBUFFERED: "1"
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install -r requirements.txt
 
-      - name: Ensure output dir exists
-        run: mkdir -p data/reports
-
-      # --- Jouw hoofd-pipeline ---
-      - name: Run pipeline
+      # ---------------------------
+      # 1) Hoofd-pipeline: bereken scores en top-5
+      # ---------------------------
+      - name: Run pipeline (maakt CSV's in data/reports)
         run: |
-          python3 run.py \
-            --limit 50 \
-            --outdir data/reports
+          mkdir -p data/reports data/state
+          python3 run.py --limit 50 --reports-dir data/reports || exit 1
+          echo "---- Listing data/reports ----"
+          ls -lah data/reports || true
 
-      # --- Moonshot v2 integratie ---
+      - name: Build top5_latest.csv from scores_latest.csv
+        run: |
+          python3 - <<'PY'
+          import csv, pathlib
+          src = pathlib.Path("data/reports/scores_latest.csv")
+          out = pathlib.Path("data/reports/top5_latest.csv")
+          rows = list(csv.DictReader(src.open(newline='')))
+          # Sorteren op 'Total_%' (aflopend) en top-5 pakken
+          rows_sorted = sorted(rows, key=lambda r: float(r.get('Total_%', 0.0)), reverse=True)[:5]
+          with out.open('w', newline='') as f:
+              w = csv.DictWriter(f, fieldnames=rows[0].keys())
+              w.writeheader()
+              w.writerows(rows_sorted)
+          print("Wrote", out)
+          PY
+
+      - name: Annotate top5 with market regime & advice
+        run: |
+          # Verwacht script uit je repo
+          python3 scripts/annotate_market_regime.py data/reports/top5_latest.md || true
+
+      # ---------------------------
+      # 2) Cooldown guard (blokkeer te snelle wissel → voeg notitie toe)
+      # Breekt de workflow NIET; schrijft alleen een noot in het MD-rapport
+      # ---------------------------
+      - name: Cooldown guard (blokkeer te snelle wissel → voeg notitie toe)
+        continue-on-error: true
+        run: |
+          python3 scripts/cooldown_guard.py \
+            --md data/reports/top5_latest.md \
+            --state data/state/last_switch.json \
+            --cooldown-days 2.0 \
+            --big-advantage 5.0
+
+      # ---------------------------
+      # 3) Moonshot v2 (exclusief top-30 + bluechips)
+      # Output: data/reports/moonshots_v2_latest.{csv,md}
+      # ---------------------------
       - name: Run Moonshot v2 (exclude top-30 + bluechips)
         run: |
           python3 scripts/moonshot_v2.py \
-            --scores-csv data/reports/scores_latest.csv \
+            --scores-csv  data/reports/scores_latest.csv \
             --scores-json data/reports/scores_latest.json \
-            --out-csv  data/reports/moonshots_v2_latest.csv \
-            --out-md   data/reports/moonshots_v2_latest.md \
+            --out-csv     data/reports/moonshots_v2_latest.csv \
+            --out-md      data/reports/moonshots_v2_latest.md \
             --top 5 \
-            --exclude-top-rank 30 \
-            --exclude-bluechips \
-            --min-volume 1
+            --min-rank 30 \
+            --exclude-bluechips
 
-      # (optioneel) datumstempel-kopie voor archief
-      - name: Stamp copies (optional)
+      # ---------------------------
+      # 4) Hernoem rapporten met datum (ISO, UTC) → direct herkenbaar wat/wanneer
+      # ---------------------------
+      - name: Rename reports with date
         run: |
           TS=$(date -u +%F)
-          for f in scores_latest.csv scores_latest.json top5_latest.md moonshots_v2_latest.csv moonshots_v2_latest.md; do
-            if [ -f "data/reports/$f" ]; then
-              cp "data/reports/$f" "data/reports/${f/_latest/_$TS}"
-            fi
-          done
 
+          # hoofd-adviezen & top5
+          [ -f data/reports/top5_latest.md ]        && mv data/reports/top5_latest.md        data/reports/pipeline_top5_${TS}.md
+          [ -f data/reports/top5_latest.csv ]       && mv data/reports/top5_latest.csv       data/reports/pipeline_top5_${TS}.csv
+
+          # alle scores
+          [ -f data/reports/scores_latest.csv ]     && mv data/reports/scores_latest.csv     data/reports/pipeline_scores_${TS}.csv
+          [ -f data/reports/scores_latest.json ]    && mv data/reports/scores_latest.json    data/reports/pipeline_scores_${TS}.json
+
+          # machine-leesbare samenvatting/regime
+          [ -f data/reports/latest.json ]           && mv data/reports/latest.json           data/reports/pipeline_latest_${TS}.json
+          [ -f data/reports/latest.csv ]            && mv data/reports/latest.csv            data/reports/pipeline_latest_${TS}.csv
+
+          # moonshots
+          [ -f data/reports/moonshots_v2_latest.md ]  && mv data/reports/moonshots_v2_latest.md  data/reports/moonshots_v2_${TS}.md
+          [ -f data/reports/moonshots_v2_latest.csv ] && mv data/reports/moonshots_v2_latest.csv data/reports/moonshots_v2_${TS}.csv
+
+          echo "---- Renamed files ----"
+          ls -lah data/reports || true
+
+      # ---------------------------
+      # 5) Upload als artifact 'reports'
+      # ---------------------------
       - name: Upload reports artifact
         uses: actions/upload-artifact@v4
         with:
           name: reports
           path: data/reports/*
-          if-no-files-found: warn
+
+      # ---------------------------
+      # (Optioneel) Commit één bestand naar branch 'reports'
+      # Zet 'if: false' naar 'true' als je dit wilt gebruiken.
+      # ---------------------------
+      - name: Commit top5_latest.csv to 'reports' branch (optional)
+        if: ${{ false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TMP=/tmp/reports
+          rm -rf "$TMP" && mkdir -p "$TMP"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git show-ref --verify --quiet refs/remotes/origin/reports; then
+            git checkout -B reports origin/reports
+          else
+            git checkout -B reports
+          fi
+
+          # Voorbeeld: top5 CSV van vandaag naar branch 'reports'
+          SRC=$(ls -1 data/reports/pipeline_top5_*.csv | tail -n 1 || true)
+          if [ -n "$SRC" ]; then
+            cp -f "$SRC" data/reports/top5_latest.csv
+            git add data/reports/top5_latest.csv
+            if ! git diff --cached --quiet; then
+              git commit -m "Update top5_latest.csv ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+              git push origin reports
+            else
+              echo "Geen wijzigingen; skip commit."
+            fi
+          else
+            echo "Geen pipeline_top5_*.csv gevonden; skip commit."
+          fi
 
