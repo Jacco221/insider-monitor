@@ -1,9 +1,9 @@
-kname: Daily Crypto Pipeline
+name: Daily Crypto Pipeline
 
 on:
   workflow_dispatch:
   schedule:
-    # 06:00 Europe/Berlin ≈ 04:00 UTC (zomer)
+    # 06:00 Europe/Amsterdam (≈ 04:00 UTC in zomertijd)
     - cron: "0 4 * * *"
 
 concurrency:
@@ -39,18 +39,16 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: Ensure output dir exists
-        run: |
-          mkdir -p data/reports
+        run: mkdir -p data/reports
 
-      # --- JOUW HOOFDPIPELINE ---
+      # --- Jouw hoofd-pipeline ---
       - name: Run pipeline
         run: |
-          # Pas flags aan als je een andere entrypoint/opties gebruikt
           python3 run.py \
             --limit 50 \
             --outdir data/reports
 
-      # --- MOONSHOT V2 INTEGRATIE ---
+      # --- Moonshot v2 integratie ---
       - name: Run Moonshot v2 (exclude top-30 + bluechips)
         run: |
           python3 scripts/moonshot_v2.py \
@@ -63,17 +61,16 @@ jobs:
             --exclude-bluechips \
             --min-volume 1
 
-      # (OPTIONEEL) extra: maak een datumstempel kopie voor archief
+      # (optioneel) datumstempel-kopie voor archief
       - name: Stamp copies (optional)
         run: |
           TS=$(date -u +%F)
           for f in scores_latest.csv scores_latest.json top5_latest.md moonshots_v2_latest.csv moonshots_v2_latest.md; do
             if [ -f "data/reports/$f" ]; then
-              cp "data/reports/$f" "data/reports/${f/_latest/_$TS}";
+              cp "data/reports/$f" "data/reports/${f/_latest/_$TS}"
             fi
           done
 
-      # --- UPLOAD ALLE RAPPORTEN ALS ARTIFACT 'reports' ---
       - name: Upload reports artifact
         uses: actions/upload-artifact@v4
         with:
