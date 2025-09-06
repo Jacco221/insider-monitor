@@ -1,106 +1,83 @@
-name: Daily Crypto Pipeline
+kname: Daily Crypto Pipeline
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
   schedule:
-    - cron: "0 4 * * *"   # Dagelijks 06:00 NL tijd (04:00 UTC)
+    # 06:00 Europe/Berlin ≈ 04:00 UTC (zomer)
+    - cron: "0 4 * * *"
 
-permissions:
-  contents: write  # nodig voor de optionele commit-stap
+concurrency:
+  group: daily-pipeline
+  cancel-in-progress: false
 
 jobs:
-  run:
+  build-and-report:
     runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.10"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Run pipeline (maakt CSV's in data/reports)
+      - name: Ensure output dir exists
         run: |
-          python3 run.py --limit 50 --reports-dir data/reports
-          echo "==== Listing data/reports ===="
-          ls -lah data/reports || true
+          mkdir -p data/reports
 
-      - name: Build top5_latest.csv from scores_latest.csv
+      # --- JOUW HOOFDPIPELINE ---
+      - name: Run pipeline
         run: |
-          python3 - <<'PY'
-          import csv
-          rows = list(csv.reader(open('data/reports/scores_latest.csv', newline='')))
-          top = [rows[0]] + rows[1:6]
-          with open('data/reports/top5_latest.csv','w',newline='') as f:
-              csv.writer(f).writerows(top)
-          print("Wrote data/reports/top5_latest.csv")
-          PY
+          # Pas flags aan als je een andere entrypoint/opties gebruikt
+          python3 run.py \
+            --limit 50 \
+            --outdir data/reports
 
-      - name: Annotate top5 with market regime & advice
+      # --- MOONSHOT V2 INTEGRATIE ---
+      - name: Run Moonshot v2 (exclude top-30 + bluechips)
         run: |
-          python3 scripts/annotate_market_regime.py data/reports/top5_latest.md
+          python3 scripts/moonshot_v2.py \
+            --scores-csv data/reports/scores_latest.csv \
+            --scores-json data/reports/scores_latest.json \
+            --out-csv  data/reports/moonshots_v2_latest.csv \
+            --out-md   data/reports/moonshots_v2_latest.md \
+            --top 5 \
+            --exclude-top-rank 30 \
+            --exclude-bluechips \
+            --min-volume 1
 
-      - name: Cooldown guard (blokkeer te snelle wissel -> voeg notitie toe)
+      # (OPTIONEEL) extra: maak een datumstempel kopie voor archief
+      - name: Stamp copies (optional)
         run: |
-          python3 scripts/cooldown_guard.py \
-            --md data/reports/top5_latest.md \
-            --state data/state/last_switch.json \
-            --cooldown-days 2.0 \
-            --big-advantage 5.0
+          TS=$(date -u +%F)
+          for f in scores_latest.csv scores_latest.json top5_latest.md moonshots_v2_latest.csv moonshots_v2_latest.md; do
+            if [ -f "data/reports/$f" ]; then
+              cp "data/reports/$f" "data/reports/${f/_latest/_$TS}";
+            fi
+          done
 
-      - name: Upload reports as artifact
+      # --- UPLOAD ALLE RAPPORTEN ALS ARTIFACT 'reports' ---
+      - name: Upload reports artifact
         uses: actions/upload-artifact@v4
         with:
           name: reports
-          path: |
-            data/reports/latest.csv
-            data/reports/latest.json
-            data/reports/scores_latest.csv
-            data/reports/scores_latest.json
-            data/reports/top5_latest.md
-            data/reports/top5_latest.csv
-
-      # Optioneel: commit alleen top5_latest.csv naar branch 'reports'
-      - name: Commit top5_latest.csv to 'reports' branch
-        if: always() && false
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ ! -f data/reports/top5_latest.csv ]; then
-            echo "top5_latest.csv ontbreekt; skip commit."
-            exit 0
-          fi
-
-          TMP=/tmp/reports
-          rm -rf "$TMP" && mkdir -p "$TMP"
-          cp -f data/reports/top5_latest.csv "$TMP/top5_latest.csv"
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git fetch origin reports || true
-          if git show-ref --verify --quiet refs/remotes/origin/reports; then
-            git checkout -B reports origin/reports
-          else
-            git checkout -B reports
-          fi
-
-          mkdir -p data/reports
-          mv -f "$TMP/top5_latest.csv" data/reports/top5_latest.csv
-          git add data/reports/top5_latest.csv
-
-          if git diff --cached --quiet; then
-            echo "Geen wijzigingen; skip commit."
-          else
-            git commit -m "Update top5_latest.csv ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
-            git push origin reports
-          fi
+          path: data/reports/*
+          if-no-files-found: warn
 
