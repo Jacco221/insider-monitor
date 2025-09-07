@@ -19,12 +19,6 @@ BLUECHIPS_DEFAULT = {
     "BCH", "LINK", "SHIB", "APT", "ARB", "OP"
 }
 
-def coerce_float(x, default=np.nan):
-    try:
-        return float(x)
-    except Exception:
-        return default
-
 def norm_float_col(df, col, default=np.nan):
     if col not in df.columns:
         df[col] = default
@@ -65,8 +59,12 @@ def build_parser():
     p.add_argument("--out-md", required=True)
     p.add_argument("--top", type=int, default=5)
     p.add_argument("--min-volume", type=float, default=1.0)
+    # officiële vlag
     p.add_argument("--exclude-top-rank", type=int, default=None,
                    help="Sluit top N marketcap coins uit (bijv. 30 = top30 eruit).")
+    # alias vlag (backwards compatibiliteit)
+    p.add_argument("--min-rank", dest="alias_min_rank", type=int, default=None,
+                   help="(Alias, deprecated) Gebruik --exclude-top-rank i.p.v. --min-rank.")
     p.add_argument("--exclude-bluechips", dest="exclude_bluechips", action="store_true", default=True)
     p.add_argument("--no-exclude-bluechips", dest="exclude_bluechips", action="store_false")
     return p
@@ -77,6 +75,10 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
+
+    # alias doorzetten
+    if args.exclude_top_rank is None and args.alias_min_rank is not None:
+        args.exclude_top_rank = args.alias_min_rank
 
     scores = read_scores(args.scores_csv, args.scores_json)
 
@@ -100,6 +102,7 @@ def main():
     )
 
     moonshots = moonshots.sort_values("MoonshotScore", ascending=False)
+    Path(args.out_csv).parent.mkdir(parents=True, exist_ok=True)
     moonshots.to_csv(args.out_csv, index=False)
 
     topk = moonshots.head(int(args.top))
