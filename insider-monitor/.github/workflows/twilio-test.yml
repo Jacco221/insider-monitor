@@ -1,4 +1,4 @@
-name: Twilio Test
+name: Twilio Test Workflow
 
 on:
   workflow_dispatch:
