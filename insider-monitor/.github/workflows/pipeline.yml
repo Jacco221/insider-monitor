@@ -2,7 +2,7 @@ name: Insider Monitor Daily
 
 on:
   schedule:
-    - cron: "15 7 * * *"     # dagelijks 07:15 UTC
+    - cron: "15 7 * * *"   # dagelijks 07:15 UTC
   workflow_dispatch:
 
 jobs:
@@ -38,15 +38,37 @@ jobs:
       - name: Run pipeline
         run: |
           python scripts/fetch_insiders.py --days 1 --config config.local.yaml
-          python scripts/score_signals.py --config config.local.yaml
-          python scripts/fetch_news.py --config config.local.yaml
-          python scripts/report_builder.py --config config.local.yaml
+          python scripts/score_signals.py   --config config.local.yaml
+          python scripts/fetch_news.py      --config config.local.yaml
+          python scripts/report_builder.py  --config config.local.yaml
 
-      - name: Send alerts (Messaging Service)
+      # Alleen bij handmatige run ook een Twilio testping sturen (niet op de nacht-cron)
+      - name: Twilio test ping (only on manual dispatch)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
           TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
-          TWILIO_MESSAGING_SID_INSIDER: ${{ secrets.TWILIO_MESSAGING_SID_INSIDER }}
           ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}
+        run: |
+          python - <<'PY'
+          import os
+          from twilio.rest import Client
+          sid=os.environ['TWILIO_ACCOUNT_SID']
+          tok=os.environ['TWILIO_AUTH_TOKEN']
+          to =os.environ['ALERT_TO_INSIDER']
+          msg=Client(sid,tok).messages.create(
+            from_="whatsapp:+14155238886",  # sandbox
+            to=to,
+            body="✅ Testping vanaf GitHub Actions (handmatige run)"
+          )
+          print("Testping SID:", msg.sid)
+          PY
+
+      - name: Send alerts (Messaging Service / sandbox)
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
+          ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}
+          TWILIO_MESSAGING_SID_INSIDER: ${{ secrets.TWILIO_MESSAGING_SID_INSIDER }} # optioneel
         run: |
           python scripts/alerts_ms.py --project insider --config config.local.yaml
