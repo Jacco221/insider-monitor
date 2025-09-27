@@ -1,8 +1,10 @@
 name: Twilio Test
+
 on:
   workflow_dispatch:
+
 jobs:
-  ping:
+  check:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "twilio-test.yml is gedetecteerd ✅"
+      - run: echo "✅ Twilio test workflow is gedetecteerd"
