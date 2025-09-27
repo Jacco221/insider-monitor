@@ -2,36 +2,7 @@ name: Twilio Test
 on:
   workflow_dispatch:
 jobs:
-  send-alert:
+  ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install Twilio
-        run: pip install twilio
-      - name: Send WhatsApp test via Twilio
-        env:
-          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
-          TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
-          ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}
-        run: |
-          python - <<'PY'
-          import os
-          from twilio.rest import Client
-          sid   = os.environ.get("TWILIO_ACCOUNT_SID")
-          token = os.environ.get("TWILIO_AUTH_TOKEN")
-          to    = os.environ.get("ALERT_TO_INSIDER")
-          if not sid or not token or not to:
-            raise SystemExit("❌ Secrets ontbreken (SID/TOKEN/TO)")
-          client = Client(sid, token)
-          msg = client.messages.create(
-            from_="whatsapp:+14155238886",
-            to=to,
-            body="✅ Testbericht vanuit GitHub Actions (Twilio Test Workflow)"
-          )
-          print("✅ Verzonden! SID:", msg.sid)
-          PY
+      - run: echo "twilio-test.yml is gedetecteerd ✅"
