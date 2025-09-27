@@ -1,0 +1,99 @@
+name: Insider Alerts (WhatsApp)
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # elke 30 min (UTC)
+  workflow_dispatch:
+
+concurrency:
+  group: insider-alerts
+  cancel-in-progress: true
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install twilio pyyaml pandas
+
+      - name: Prepare config.local.yaml
+        run: |
+          python - <<'PY'
+          import os, yaml
+          p='config.local.yaml'
+          cfg={}
+          if os.path.exists(p):
+              cfg = yaml.safe_load(open(p)) or {}
+          ua = os.getenv('SEC_USER_AGENT')
+          if ua:
+              cfg.setdefault('user_agent', {})['ua'] = ua
+              yaml.safe_dump(cfg, open(p,'w'), sort_keys=False, allow_unicode=True)
+          print("✅ config.local.yaml ok")
+          PY
+
+      - name: Run insider pipeline
+        run: |
+          set -e
+          python scripts/fetch_insiders.py --days 1 --config config.local.yaml
+          python scripts/score_signals.py   --config config.local.yaml
+          python scripts/report_builder.py  --config config.local.yaml
+
+      - name: Detect new signals & build message
+        id: build
+        run: |
+          python - <<'PY'
+          import glob, os, sys
+          import pandas as pd
+          files = sorted(glob.glob('data/reports/insider_signals_*.csv'))
+          if not files:
+              print("::set-output name=has_news::false"); sys.exit(0)
+          latest = files[-1]
+          df = pd.read_csv(latest)
+          if df.empty:
+              print("::set-output name=has_news::false"); sys.exit(0)
+          fields = ['ticker','name','buy_label','amount_usd','transaction_date']
+          cols = [c for c in fields if c in df.columns]
+          sub = df[cols].head(5) if cols else df.head(5)
+          lines=[]
+          for _, r in sub.iterrows():
+              t = r.get('ticker','?'); who=r.get('name',''); label=r.get('buy_label',''); amt=r.get('amount_usd',''); dt=r.get('transaction_date','')
+              lines.append(f"{t}: {label} {amt} — {who} ({dt})")
+          msg = "🔔 Insider alerts\n" + "\n".join(lines)
+          if len(df) > 5: msg += f"\n… +{len(df)-5} extra"
+          open('ALERT_MESSAGE.txt','w').write(msg)
+          print("::set-output name=has_news::true")
+          PY
+
+      - name: Send WhatsApp via Twilio
+        if: steps.build.outputs.has_news == 'true'
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          ALERT_TO_INSIDER:  ${{ secrets.ALERT_TO_INSIDER }}
+        run: |
+          python - <<'PY'
+          import os
+          from twilio.rest import Client
+          sid=os.environ['TWILIO_ACCOUNT_SID']; token=os.environ['TWILIO_AUTH_TOKEN']; to=os.environ['ALERT_TO_INSIDER']
+          m = Client(sid, token).messages.create(from_='whatsapp:+14155238886', to=to, body=open('ALERT_MESSAGE.txt').read())
+          print("✅ WhatsApp sent:", m.sid)
+          PY
+
+      - name: Upload artifacts (optional)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: insider-reports
+          path: |
+            data/reports/**
+            ALERT_MESSAGE.txt
