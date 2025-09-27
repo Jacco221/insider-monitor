@@ -1,0 +1,52 @@
+name: Insider Monitor Daily
+
+on:
+  schedule:
+    - cron: "15 7 * * *"     # dagelijks 07:15 UTC
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Configure config.local.yaml
+        run: |
+          cp config.yaml config.local.yaml || true
+          python - << 'PY'
+          import yaml, os
+          p='config.local.yaml'
+          cfg=yaml.safe_load(open(p))
+          ua=os.getenv('SEC_USER_AGENT')
+          if ua:
+              cfg.setdefault('sec', {})['user_agent']=ua
+          open(p,'w').write(yaml.safe_dump(cfg, sort_keys=False))
+          PY
+        env:
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+
+      - name: Run pipeline
+        run: |
+          python scripts/fetch_insiders.py --days 1 --config config.local.yaml
+          python scripts/score_signals.py --config config.local.yaml
+          python scripts/fetch_news.py --config config.local.yaml
+          python scripts/report_builder.py --config config.local.yaml
+
+      - name: Send alerts (Messaging Service)
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_MESSAGING_SID_INSIDER: ${{ secrets.TWILIO_MESSAGING_SID_INSIDER }}
+          ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}
+        run: |
+          python scripts/alerts_ms.py --project insider --config config.local.yaml
