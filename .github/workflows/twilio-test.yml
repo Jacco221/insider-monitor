@@ -1,0 +1,42 @@
+name: Twilio Test Workflow
+
+on:
+  workflow_dispatch:
+
+jobs:
+  send_test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (not strictly needed)
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Send WhatsApp via Twilio (SANDBOX)
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
+          ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}   # bv: whatsapp:+31652615803
+        run: |
+          python - <<'PY'
+          import os, sys
+          from twilio.rest import Client
+
+          sid   = os.getenv("TWILIO_ACCOUNT_SID")
+          token = os.getenv("TWILIO_AUTH_TOKEN")
+          to    = os.getenv("ALERT_TO_INSIDER")
+          if not sid or not token or not to:
+              print("❌ Secrets ontbreken (SID/TOKEN/TO)")
+              sys.exit(1)
+
+          client = Client(sid, token)
+          msg = client.messages.create(
+              from_="whatsapp:+14155238886",   # Twilio WhatsApp SANDBOX
+              to=to,
+              body="✅ Insider Monitor test via GitHub Actions (Twilio SANDBOX)."
+          )
+          print("✅ Verzonden. Message SID:", msg.sid)
+          PY
