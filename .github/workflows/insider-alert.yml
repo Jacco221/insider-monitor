@@ -1,9 +1,9 @@
 name: Insider Alerts (WhatsApp)
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch: {}        # <-- hierdoor verschijnt "Run workflow" in Actions
   schedule:
-    - cron: "*/30 * * * *"   # elke 30 minuten
+    - cron: "*/30 * * * *"     # elke 30 minuten
 
 jobs:
   alert:
@@ -71,7 +71,8 @@ jobs:
           sid = os.environ["TWILIO_ACCOUNT_SID"]
           token = os.environ["TWILIO_AUTH_TOKEN"]
           to = os.environ["TO"]
-          body = f"✅ Insider Monitor: nieuwe signalen. {os.environ.get('SUMMARY','')}".strip()
+          summary = os.environ.get("SUMMARY","").strip()
+          body = ("✅ Insider Monitor: nieuwe signalen. " + summary).strip()
 
           msg = Client(sid, token).messages.create(
               from_="whatsapp:+14155238886",  # Twilio WhatsApp SANDBOX
