@@ -1,22 +1,20 @@
 name: Insider Alerts (WhatsApp)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
+  # Run every 30 minutes (UTC). Adjust if you want a different cadence.
   schedule:
-    - cron: "*/30 * * * *"   # elke 30 minuten
-
-permissions:
-  contents: read
+    - cron: "*/30 * * * *"
 
 jobs:
   alert:
     runs-on: ubuntu-latest
 
+    # One env block at the JOB level (do not duplicate)
     env:
-      # Twilio secrets moeten in repo Settings → Secrets and variables → Actions staan
       TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
-      TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
-      ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}  # bijv. "whatsapp:+31652615803"
+      TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+      ALERT_TO_INSIDER: ${{ secrets.ALERT_TO_INSIDER }}
 
     steps:
       - name: Checkout
@@ -30,114 +28,87 @@ jobs:
       - name: Install dependencies (requirements + runtime)
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          fi
-          # Zorg dat we twilio en yaml altijd hebben
-          pip install twilio pyyaml
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # Ensure these exist even if not in requirements.txt
+          pip install pyyaml twilio
 
-      - name: Prepare config.local.yaml (best effort)
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import os, yaml, pathlib
-          p = pathlib.Path("config.local.yaml")
-          if not p.exists():
-              with open(p, "w") as f:
-                  yaml.safe_dump({}, f)
-              print("✓ config.local.yaml aangemaakt")
-          else:
-              # voeg desnoods user-agent toe als veld bestaat
-              try:
-                  with open(p) as fr:
-                      cfg = yaml.safe_load(fr) or {}
-                  if "user_agent" not in cfg:
-                      cfg["user_agent"] = os.getenv("SEC_USER_AGENT","")
-                      with open(p,"w") as fw:
-                          yaml.safe_dump(cfg, fw, sort_keys=False, allow_unicode=True)
-                      print("✓ config.local.yaml geüpdatet")
-                  else:
-                      print("✓ config.local.yaml aanwezig")
-              except Exception as e:
-                  print("! kon config.local.yaml niet verwerken:", e)
-          PY
-
-      - name: Debug repo layout (top)
-        run: |
-          echo "Top-level:"
-          ls -lah
-          echo "----"
-          [ -d data/reports ] && ls -lah data/reports || true
-
-      - name: Run pipeline (run.py)
+      - name: Prepare config.local.yaml
         run: |
           set -e
-          # Als run.py CLI-args vereist, zet ze hier. Voor nu: zonder args.
-          python run.py || python3 run.py
+          cat > config.local.yaml <<'YAML'
+          ua: "${{ github.actor }}"
+          YAML
 
-      - name: Locate newest insider_signals report
-        id: find_report
+      - name: Locate scripts dynamically (fail fast)
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          files=(data/reports/insider_signals_*.csv)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "found=no" >> "$GITHUB_OUTPUT"
+          echo "Top-level tree:"
+          ls -la
+          echo "Checking scripts exist..."
+          test -f scripts/fetch_insiders.py
+          test -f scripts/score_signals.py
+          test -f scripts/fetch_news.py
+          test -f scripts/report_builder.py
+
+      - name: Run insider pipeline
+        id: run_pipeline
+        run: |
+          set -e
+          python scripts/fetch_insiders.py --days 1 --config config.local.yaml
+          python scripts/score_signals.py   --config config.local.yaml
+          python scripts/fetch_news.py      --config config.local.yaml
+          # Ensure output directory exists
+          mkdir -p data/reports
+          python scripts/report_builder.py  --config config.local.yaml --out data/reports
+
+      - name: Detect new signals & build message
+        id: find_report
+        run: |
+          set -e
+          latest="$(ls -1 data/reports/insider_signals_*.csv 2>/dev/null | tail -n 1 || true)"
+          if [ -z "$latest" ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # pak nieuwste op mtime
-          newest="$(ls -t data/reports/insider_signals_*.csv | head -n1)"
-          echo "Newest report: $newest"
-          # minimaal 2 regels? (header + 1 record)
-          lines=$(wc -l < "$newest" | tr -d ' ')
-          echo "lines=$lines"
-          if [ "$lines" -ge 2 ]; then
-            echo "found=yes"   >> "$GITHUB_OUTPUT"
-            echo "path=$newest" >> "$GITHUB_OUTPUT"
-            # bouw een korte samenvatting (eerste paar regels)
-            summary="$(head -n 5 "$newest" | sed 's/|/,/g' | tr -d '\r')"
-            # maskeer nieuwe regels voor output
-            summary_one_line="$(printf "%s" "$summary" | paste -sd ' | ' -)"
-            echo "summary=$summary_one_line" >> "$GITHUB_OUTPUT"
-          else
-            echo "found=no" >> "$GITHUB_OUTPUT"
-          fi
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "file=$latest" >> "$GITHUB_OUTPUT"
+          # Short WA message text
+          summary="🟢 Insider Monitor: nieuwe signalen · $(basename "$latest")"
+          echo "summary=$summary" >> "$GITHUB_OUTPUT"
 
-      - name: Send WhatsApp via Twilio (only if new)
-        if: steps.find_report.outputs.found == 'yes'
-        env:
-          SID:   ${{ env.TWILIO_ACCOUNT_SID }}
-          TOKEN: ${{ env.TWILIO_AUTH_TOKEN }}
-          TO:    ${{ env.ALERT_TO_INSIDER }}
+      - name: Send WhatsApp via Twilio (only if alert)
+        if: steps.find_report.outputs.found == 'true'
         run: |
           python - <<'PY'
           import os
           from twilio.rest import Client
 
-          sid   = os.environ.get("SID")
-          token = os.environ.get("TOKEN")
-          to    = os.environ.get("TO")
-          body  = os.environ.get("BODY","")
-          if not sid or not token or not to:
-              raise SystemExit("Twilio env vars ontbreken (SID/TOKEN/TO)")
+          sid   = os.environ["TWILIO_ACCOUNT_SID"]
+          token = os.environ["TWILIO_AUTH_TOKEN"]
+          to    = os.environ["ALERT_TO_INSIDER"]
 
-          msg = Client(sid, token).messages.create(
-              from_="whatsapp:+14155238886",  # Twilio WhatsApp SANDBOX nummer
+          # Message from previous step
+          body  = os.environ.get("BODY", "🟢 Insider Monitor: nieuwe signalen")
+          latest = os.environ.get("FILE", "")
+
+          if latest:
+              body = f"{body}\n{latest}"
+
+          client = Client(sid, token)
+          msg = client.messages.create(
+              from_="whatsapp:+14155238886",  # Twilio WhatsApp SANDBOX number
               to=to,
-              body=body,
+              body=body
           )
-          print("✓ WhatsApp verzonden, SID:", msg.sid)
+          print("✅ WhatsApp verzonden. SID:", msg.sid)
           PY
         env:
-          BODY: |
-            ✅ Insider Monitor: nieuwe signals gedetecteerd.
-            Samenvatting: ${{ steps.find_report.outputs.summary }}
+          BODY: ${{ steps.find_report.outputs.summary }}
+          FILE: ${{ steps.find_report.outputs.file }}
 
-      # (Optioneel) upload rapporten als artifact om te downloaden via Actions UI
       - name: Upload reports (optional)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: reports
           path: data/reports/**
-          if-no-files-found: ignore
