@@ -1,9 +1,7 @@
 name: Insider Alerts (WhatsApp)
 
 on:
-  # handmatig starten via Actions UI
   workflow_dispatch: {}
-  # automatisch elke 30 minuten
   schedule:
     - cron: "*/30 * * * *"
 
@@ -26,9 +24,7 @@ jobs:
       - name: Installeer dependencies
         run: |
           python -m pip install --upgrade pip
-          # algemene requirements (bestaat al in jouw repo)
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          # extra's die we hier zeker nodig hebben
           pip install twilio pyyaml
 
       - name: (Optioneel) config.local.yaml bijwerken met user-agent secret
@@ -48,31 +44,58 @@ jobs:
               print("ℹ️  Geen SEC_USER_AGENT secret gezet (mag)")
           PY
 
-      - name: Zoek scripts-map (fail fast)
-        id: find
+      # ------ HIER ZIT DE VERBETERING ------
+      - name: Zoek scripts & toon inhoud (auto-discover)
+        id: discover
         run: |
           set -euo pipefail
-          prefix=""
+
+          echo "== Top-level =="
+          ls -la
+
+          # Kandidaten waarin 'scripts' kan staan
           for cand in "." "insider-monitor" "src"; do
-            if [ -f "$cand/scripts/fetch_insiders.py" ]; then prefix="$cand"; break; fi
+            if [ -d "$cand/scripts" ]; then
+              echo "== Inhoud van $cand/scripts =="
+              ls -la "$cand/scripts" || true
+
+              # Probeer veelgebruikte naam-patronen te vinden
+              fetch=$(ls "$cand/scripts" | grep -Ei 'fetch.*insider.*\.py' || true)
+              score=$(ls "$cand/scripts" | grep -Ei 'score.*signal.*\.py'  || true)
+              news=$(ls "$cand/scripts"  | grep -Ei 'fetch.*news.*\.py'    || true)
+              report=$(ls "$cand/scripts"| grep -Ei 'report.*builder.*\.py'|| true)
+
+              if [ -n "$fetch" ] && [ -n "$score" ] && [ -n "$news" ] && [ -n "$report" ]; then
+                echo "prefix=$cand" >> "$GITHUB_OUTPUT"
+                echo "fetch=$fetch" >> "$GITHUB_OUTPUT"
+                echo "score=$score" >> "$GITHUB_OUTPUT"
+                echo "news=$news"   >> "$GITHUB_OUTPUT"
+                echo "report=$report" >> "$GITHUB_OUTPUT"
+
+                echo "== GEVONDEN SCRIPTS =="
+                echo "FETCH : $fetch"
+                echo "SCORE : $score"
+                echo "NEWS  : $news"
+                echo "REPORT: $report"
+                exit 0
+              fi
+            fi
           done
-          echo "GEVONDEN prefix: '$prefix'"
-          if [ -z "$prefix" ]; then
-            echo "❌ Kon 'scripts/*' niet vinden in ., insider-monitor of src"
-            echo "Top-level tree:"
-            ls -la
-            exit 1
-          fi
-          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+
+          echo "❌ Geen passende scriptbestanden gevonden."
+          echo "We zochten op patronen:"
+          echo "  fetch.*insider.*.py, score.*signal.*.py, fetch.*news.*.py, report.*builder.*.py"
+          echo "Controleer bestandsnamen in de map 'scripts/'."
+          exit 1
 
       - name: Draai insider pipeline
         run: |
           set -e
-          cd "${{ steps.find.outputs.prefix }}"
-          python scripts/fetch_insiders.py --days 1 --config ../config.local.yaml
-          python scripts/score_signals.py  --config ../config.local.yaml
-          python scripts/fetch_news.py    --config ../config.local.yaml
-          python scripts/report_builder.py --config ../config.local.yaml
+          cd "${{ steps.discover.outputs.prefix }}"
+          python "scripts/${{ steps.discover.outputs.fetch }}"  --days 1 --config ../config.local.yaml
+          python "scripts/${{ steps.discover.outputs.score }}"  --config ../config.local.yaml
+          python "scripts/${{ steps.discover.outputs.news }}"   --config ../config.local.yaml
+          python "scripts/${{ steps.discover.outputs.report }}" --config ../config.local.yaml
 
       - name: Detecteer nieuwe signalen & bouw samenvatting
         id: report
@@ -82,7 +105,6 @@ jobs:
           if [ -n "$latest" ]; then
             echo "found=true" >> "$GITHUB_OUTPUT"
             echo "path=$latest"  >> "$GITHUB_OUTPUT"
-            # heel korte samenvatting (pas aan naar wens)
             summary=$(head -n 2 "$latest" | tr '\n' ' ')
             echo "summary=$summary" >> "$GITHUB_OUTPUT"
             echo "✅ Rapport gevonden: $latest"
@@ -96,30 +118,26 @@ jobs:
         env:
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
           TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
-          ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}  # bijv. 'whatsapp:+316xxxxxxx'
+          ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}
           BODY: ${{ steps.report.outputs.summary }}
         run: |
           python - <<'PY'
           import os
           from twilio.rest import Client
-
           sid   = os.environ.get('TWILIO_ACCOUNT_SID')
           token = os.environ.get('TWILIO_AUTH_TOKEN')
           to    = os.environ.get('ALERT_TO_INSIDER')
           body  = os.environ.get('BODY') or "Insider Monitor: nieuwe signalen gedetecteerd."
-
           assert sid and token and to, "❌ Twilio secrets ontbreken (SID/TOKEN/TO)"
-
-          client = Client(sid, token)
-          msg = client.messages.create(
-              from_='whatsapp:+14155238886',  # Twilio sandbox sender
-              to=to,
-              body=body
+          msg = Client(sid, token).messages.create(
+            from_='whatsapp:+14155238886',
+            to=to,
+            body=body
           )
           print("✅ WhatsApp verzonden, SID:", msg.sid)
           PY
 
-      - name: Upload rapporten (artifact) – handig om te downloaden
+      - name: Upload rapporten (artifact)
         if: always()
         uses: actions/upload-artifact@v4
         with:
