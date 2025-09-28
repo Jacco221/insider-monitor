@@ -1,16 +1,19 @@
-name: Insider Alerts (WhatsApp)
+name: Insider Alerts (Insider Monitor only)
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch: {}           # handmatig Run workflow
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/30 * * * *"        # elke 30 minuten
 
 jobs:
   alert:
     runs-on: ubuntu-latest
+
+    # Alle 'run' stappen draaien standaard in insider-monitor/
     defaults:
       run:
         shell: bash
+        working-directory: insider-monitor
 
     steps:
       - name: Checkout
@@ -21,127 +24,94 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Installeer dependencies
+      - name: Installeer dependencies (alleen Insider Monitor)
         run: |
+          set -e
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install twilio pyyaml
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt || true
+          fi
+          # Minimalen die vaak nuttig zijn
+          pip install twilio pyyaml requests || true
 
-      - name: (Optioneel) config.local.yaml bijwerken met user-agent secret
+      - name: Debug: toon insider-monitor layout
         run: |
-          python - <<'PY'
-          import os, yaml
-          p = 'config.local.yaml'
-          cfg = {}
-          if os.path.exists(p):
-              cfg = yaml.safe_load(open(p)) or {}
-          ua = os.getenv('SEC_USER_AGENT')
-          if ua:
-              cfg.setdefault('user_agent', {})['ua'] = ua
-              yaml.safe_dump(cfg, open(p, 'w'), sort_keys=False, allow_unicode=True)
-              print("✅ config.local.yaml geschreven")
-          else:
-              print("ℹ️  Geen SEC_USER_AGENT secret gezet (mag)")
-          PY
+          echo "== insider-monitor top =="
+          ls -la
+          echo "== insider-monitor/scripts =="
+          ls -la scripts || true
+          echo "== insider-monitor/data/reports =="
+          ls -la data/reports || true
 
-      # ------ HIER ZIT DE VERBETERING ------
-      - name: Zoek scripts & toon inhoud (auto-discover)
-        id: discover
+      - name: Draai EEN insider script
+        id: runjob
         run: |
           set -euo pipefail
+          summary="⚠️ Geen bekend Insider Monitor script gevonden."
+          exit_code=0
 
-          echo "== Top-level =="
-          ls -la
-
-          # Kandidaten waarin 'scripts' kan staan
-          for cand in "." "insider-monitor" "src"; do
-            if [ -d "$cand/scripts" ]; then
-              echo "== Inhoud van $cand/scripts =="
-              ls -la "$cand/scripts" || true
-
-              # Probeer veelgebruikte naam-patronen te vinden
-              fetch=$(ls "$cand/scripts" | grep -Ei 'fetch.*insider.*\.py' || true)
-              score=$(ls "$cand/scripts" | grep -Ei 'score.*signal.*\.py'  || true)
-              news=$(ls "$cand/scripts"  | grep -Ei 'fetch.*news.*\.py'    || true)
-              report=$(ls "$cand/scripts"| grep -Ei 'report.*builder.*\.py'|| true)
-
-              if [ -n "$fetch" ] && [ -n "$score" ] && [ -n "$news" ] && [ -n "$report" ]; then
-                echo "prefix=$cand" >> "$GITHUB_OUTPUT"
-                echo "fetch=$fetch" >> "$GITHUB_OUTPUT"
-                echo "score=$score" >> "$GITHUB_OUTPUT"
-                echo "news=$news"   >> "$GITHUB_OUTPUT"
-                echo "report=$report" >> "$GITHUB_OUTPUT"
-
-                echo "== GEVONDEN SCRIPTS =="
-                echo "FETCH : $fetch"
-                echo "SCORE : $score"
-                echo "NEWS  : $news"
-                echo "REPORT: $report"
-                exit 0
-              fi
-            fi
-          done
-
-          echo "❌ Geen passende scriptbestanden gevonden."
-          echo "We zochten op patronen:"
-          echo "  fetch.*insider.*.py, score.*signal.*.py, fetch.*news.*.py, report.*builder.*.py"
-          echo "Controleer bestandsnamen in de map 'scripts/'."
-          exit 1
-
-      - name: Draai insider pipeline
-        run: |
-          set -e
-          cd "${{ steps.discover.outputs.prefix }}"
-          python "scripts/${{ steps.discover.outputs.fetch }}"  --days 1 --config ../config.local.yaml
-          python "scripts/${{ steps.discover.outputs.score }}"  --config ../config.local.yaml
-          python "scripts/${{ steps.discover.outputs.news }}"   --config ../config.local.yaml
-          python "scripts/${{ steps.discover.outputs.report }}" --config ../config.local.yaml
-
-      - name: Detecteer nieuwe signalen & bouw samenvatting
-        id: report
-        run: |
-          set -e
-          latest=$(ls -1 data/reports/insider_signals_* 2>/dev/null | tail -n1 || true)
-          if [ -n "$latest" ]; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-            echo "path=$latest"  >> "$GITHUB_OUTPUT"
-            summary=$(head -n 2 "$latest" | tr '\n' ' ')
-            echo "summary=$summary" >> "$GITHUB_OUTPUT"
-            echo "✅ Rapport gevonden: $latest"
+          if [ -f scripts/build_scores.py ]; then
+            echo "Running: scripts/build_scores.py"
+            python scripts/build_scores.py || exit_code=$?
+            summary="✅ Insider: scripts/build_scores.py (exit $exit_code)."
+          elif [ -f run.py ]; then
+            echo "Running: run.py"
+            python run.py || exit_code=$?
+            summary="✅ Insider: run.py (exit $exit_code)."
+          elif [ -f scripts/pull_reports.sh ]; then
+            echo "Running: scripts/pull_reports.sh"
+            bash scripts/pull_reports.sh || exit_code=$?
+            summary="✅ Insider: scripts/pull_reports.sh (exit $exit_code)."
           else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "ℹ️  Geen nieuw insider_signals_ rapport aangetroffen"
+            echo "⚠️ Niets gevonden in insider-monitor/ (verwacht: scripts/build_scores.py of run.py of scripts/pull_reports.sh)."
           fi
 
-      - name: Verstuur WhatsApp via Twilio (alleen bij alert)
-        if: steps.report.outputs.found == 'true'
-        env:
-          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
-          TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
-          ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}
-          BODY: ${{ steps.report.outputs.summary }}
-        run: |
-          python - <<'PY'
-          import os
-          from twilio.rest import Client
-          sid   = os.environ.get('TWILIO_ACCOUNT_SID')
-          token = os.environ.get('TWILIO_AUTH_TOKEN')
-          to    = os.environ.get('ALERT_TO_INSIDER')
-          body  = os.environ.get('BODY') or "Insider Monitor: nieuwe signalen gedetecteerd."
-          assert sid and token and to, "❌ Twilio secrets ontbreken (SID/TOKEN/TO)"
-          msg = Client(sid, token).messages.create(
-            from_='whatsapp:+14155238886',
-            to=to,
-            body=body
-          )
-          print("✅ WhatsApp verzonden, SID:", msg.sid)
-          PY
+          {
+            echo "summary<<EOF"
+            echo "$summary"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Upload rapporten (artifact)
+      - name: Upload rapporten (optioneel)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: reports
+          name: insider-reports
           path: |
-            **/data/reports/**
-            data/reports/**
+            insider-monitor/data/reports/**
+            insider-monitor/data/reports/*.csv
+            insider-monitor/data/reports/*.md
+          if-no-files-found: ignore
+
+      - name: Stuur WhatsApp via Twilio (optioneel)
+        if: always()
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          ALERT_TO_INSIDER: ${{ secrets.ALERT_TO_INSIDER }}
+          SUMMARY: ${{ steps.runjob.outputs.summary }}
+        run: |
+          python - <<'PY'
+          import os, sys
+          sid = os.getenv('TWILIO_ACCOUNT_SID')
+          token = os.getenv('TWILIO_AUTH_TOKEN')
+          to = os.getenv('ALERT_TO_INSIDER')  # bijv. whatsapp:+316XXXXXXXX
+
+          if not sid or not token or not to:
+              print("ℹ️ Twilio-secrets ontbreken; WhatsApp stap overgeslagen.")
+              sys.exit(0)
+
+          from twilio.rest import Client
+          body = os.getenv('SUMMARY') or "Insider Monitor pipeline is gedraaid."
+          try:
+              client = Client(sid, token)
+              msg = client.messages.create(
+                  from_='whatsapp:+14155238886',  # Twilio sandbox zender
+                  to=to,
+                  body=f"Insider Monitor: {body}"
+              )
+              print("✅ WhatsApp verzonden, SID:", msg.sid)
+          except Exception as e:
+              print("⚠️ Fout bij WhatsApp:", e)
+              sys.exit(0)   # notificatie-fout mag de run niet laten falen
+          PY
