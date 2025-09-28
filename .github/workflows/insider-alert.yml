@@ -1,20 +1,13 @@
-name: Insider Alerts (Insider Monitor only)
+name: Insider Alerts (WhatsApp)
 
 on:
-  workflow_dispatch: {}           # handmatig Run workflow
+  workflow_dispatch: {}   # <-- hierdoor zie je én kun je 'Run workflow' gebruiken
   schedule:
-    - cron: "*/30 * * * *"        # elke 30 minuten
+    - cron: "*/30 * * * *"  # elke 30 minuten
 
 jobs:
   alert:
     runs-on: ubuntu-latest
-
-    # Alle 'run' stappen draaien standaard in insider-monitor/
-    defaults:
-      run:
-        shell: bash
-        working-directory: insider-monitor
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,94 +17,107 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Installeer dependencies (alleen Insider Monitor)
+      - name: Installeer dependencies (requirements + runtime)
         run: |
-          set -e
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt || true
-          fi
-          # Minimalen die vaak nuttig zijn
-          pip install twilio pyyaml requests || true
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install twilio pyyaml
 
-      - name: Debug: toon insider-monitor layout
+      - name: (optioneel) config.local.yaml bijwerken met user-agent secret
+        if: ${{ secrets.SEC_USER_AGENT != '' }}
         run: |
-          echo "== insider-monitor top =="
-          ls -la
-          echo "== insider-monitor/scripts =="
-          ls -la scripts || true
-          echo "== insider-monitor/data/reports =="
-          ls -la data/reports || true
+          python - <<'PY'
+          import os, yaml, pathlib
+          p = pathlib.Path('config.local.yaml')
+          cfg = {}
+          if p.exists():
+              with p.open('r') as f:
+                  cfg = yaml.safe_load(f) or {}
+          ua = os.getenv('SEC_USER_AGENT')
+          if ua:
+              cfg.setdefault('user_agent', {})['ua'] = ua
+              with p.open('w') as f:
+                  yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
+              print("config.local.yaml bijgewerkt")
+          PY
 
-      - name: Draai EEN insider script
-        id: runjob
+      - name: Zoek scripts-map (auto-discover)
+        id: find_scripts
         run: |
           set -euo pipefail
-          summary="⚠️ Geen bekend Insider Monitor script gevonden."
-          exit_code=0
+          # kandidaten in volgorde:
+          for d in scripts insider-monitor/src src; do
+            if [ -d "$d" ]; then
+              echo "prefix=$d" >> $GITHUB_OUTPUT
+              break
+            fi
+          done
+          echo "Gevonden prefix: '${{ steps.find_scripts.outputs.prefix || '' }}'"
 
-          if [ -f scripts/build_scores.py ]; then
-            echo "Running: scripts/build_scores.py"
-            python scripts/build_scores.py || exit_code=$?
-            summary="✅ Insider: scripts/build_scores.py (exit $exit_code)."
-          elif [ -f run.py ]; then
-            echo "Running: run.py"
-            python run.py || exit_code=$?
-            summary="✅ Insider: run.py (exit $exit_code)."
-          elif [ -f scripts/pull_reports.sh ]; then
-            echo "Running: scripts/pull_reports.sh"
-            bash scripts/pull_reports.sh || exit_code=$?
-            summary="✅ Insider: scripts/pull_reports.sh (exit $exit_code)."
-          else
-            echo "⚠️ Niets gevonden in insider-monitor/ (verwacht: scripts/build_scores.py of run.py of scripts/pull_reports.sh)."
+      - name: Draai insider pipeline (dummy run ok)
+        run: |
+          set -euo pipefail
+          PFX="${{ steps.find_scripts.outputs.prefix }}"
+          if [ -z "${PFX}" ]; then
+            echo "Kon scripts/* niet vinden in ., insider-monitor of src"
+            exit 1
           fi
+          echo "== Inhoud van ${PFX} =="
+          ls -la "${PFX}"
+          echo "== Try run =="
+          python "${PFX}/fetch_insiders.py" || true
+          python "${PFX}/score_signals.py" || true
+          python "${PFX}/fetch_news.py"   || true
+          python "${PFX}/report_builder.py" || true
+          echo "DONE (dummy run toegestaan)"
 
-          {
-            echo "summary<<EOF"
-            echo "$summary"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+      - name: Detecteer nieuwe signalen & bouw samenvatting
+        id: build_report
+        run: |
+          set -euo pipefail
+          # Dummy: maak altijd een korte samenvatting
+          SUMMARY="✅ Insider Monitor: dummy samenvatting (placeholder)"
+          echo "summary=${SUMMARY}" >> $GITHUB_OUTPUT
 
+      - name: Verstuur WhatsApp via Twilio (alleen bij alert)
+        if: ${{ steps.build_report.outputs.summary != '' && secrets.TWILIO_ACCOUNT_SID != '' && secrets.TWILIO_AUTH_TOKEN != '' && secrets.ALERT_TO_INSIDER != '' }}
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
+          ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}
+        run: |
+          python - <<'PY'
+          import os, sys
+          from twilio.rest import Client
+
+          sid   = os.getenv("TWILIO_ACCOUNT_SID")
+          token = os.getenv("TWILIO_AUTH_TOKEN")
+          to    = os.getenv("ALERT_TO_INSIDER")
+          body  = os.getenv("BODY") or "Insider Monitor test (GitHub Actions)."
+
+          if not sid or not token or not to:
+              print("❌ Secrets ontbreken (SID/TOKEN/TO)")
+              sys.exit(1)
+
+          client = Client(sid, token)
+          msg = client.messages.create(
+              from_="whatsapp:+14155238886",   # Twilio sandbox
+              to=to,
+              body=body,
+          )
+          print("✅ WhatsApp verstuurd, SID:", msg.sid)
+          PY
+        env:
+          BODY: ${{ steps.build_report.outputs.summary }}
+
+      # (optioneel) upload rapporten als artifact
       - name: Upload rapporten (optioneel)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: insider-reports
+          name: reports
           path: |
-            insider-monitor/data/reports/**
-            insider-monitor/data/reports/*.csv
-            insider-monitor/data/reports/*.md
-          if-no-files-found: ignore
+            data/reports/**
+            reports/**
+            **/reports/**
 
-      - name: Stuur WhatsApp via Twilio (optioneel)
-        if: always()
-        env:
-          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
-          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
-          ALERT_TO_INSIDER: ${{ secrets.ALERT_TO_INSIDER }}
-          SUMMARY: ${{ steps.runjob.outputs.summary }}
-        run: |
-          python - <<'PY'
-          import os, sys
-          sid = os.getenv('TWILIO_ACCOUNT_SID')
-          token = os.getenv('TWILIO_AUTH_TOKEN')
-          to = os.getenv('ALERT_TO_INSIDER')  # bijv. whatsapp:+316XXXXXXXX
-
-          if not sid or not token or not to:
-              print("ℹ️ Twilio-secrets ontbreken; WhatsApp stap overgeslagen.")
-              sys.exit(0)
-
-          from twilio.rest import Client
-          body = os.getenv('SUMMARY') or "Insider Monitor pipeline is gedraaid."
-          try:
-              client = Client(sid, token)
-              msg = client.messages.create(
-                  from_='whatsapp:+14155238886',  # Twilio sandbox zender
-                  to=to,
-                  body=f"Insider Monitor: {body}"
-              )
-              print("✅ WhatsApp verzonden, SID:", msg.sid)
-          except Exception as e:
-              print("⚠️ Fout bij WhatsApp:", e)
-              sys.exit(0)   # notificatie-fout mag de run niet laten falen
-          PY
