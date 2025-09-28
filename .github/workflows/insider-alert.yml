@@ -1,114 +1,30 @@
-name: Insider Alerts (WhatsApp)
-
-on:
-  workflow_dispatch: {}
-  # Run every 30 minutes (UTC). Adjust if you want a different cadence.
-  schedule:
-    - cron: "*/30 * * * *"
-
-jobs:
-  alert:
-    runs-on: ubuntu-latest
-
-    # One env block at the JOB level (do not duplicate)
-    env:
-      TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
-      TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
-      ALERT_TO_INSIDER: ${{ secrets.ALERT_TO_INSIDER }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies (requirements + runtime)
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          # Ensure these exist even if not in requirements.txt
-          pip install pyyaml twilio
-
-      - name: Prepare config.local.yaml
-        run: |
-          set -e
-          cat > config.local.yaml <<'YAML'
-          ua: "${{ github.actor }}"
-          YAML
-
-      - name: Locate scripts dynamically (fail fast)
+      - name: Locate scripts dynamically
+        id: find_scripts
+        shell: bash
         run: |
           set -euo pipefail
           echo "Top-level tree:"
           ls -la
-          echo "Checking scripts exist..."
-          test -f scripts/fetch_insiders.py
-          test -f scripts/score_signals.py
-          test -f scripts/fetch_news.py
-          test -f scripts/report_builder.py
 
-      - name: Run insider pipeline
-        id: run_pipeline
-        run: |
-          set -e
-          python scripts/fetch_insiders.py --days 1 --config config.local.yaml
-          python scripts/score_signals.py   --config config.local.yaml
-          python scripts/fetch_news.py      --config config.local.yaml
-          # Ensure output directory exists
-          mkdir -p data/reports
-          python scripts/report_builder.py  --config config.local.yaml --out data/reports
+          # Find by filename anywhere in the repo
+          FETCH=$(git ls-files | grep -E '(^|/)fetch_insiders\.py$'    || true)
+          SCORE=$(git ls-files | grep -E '(^|/)score_signals\.py$'     || true)
+          NEWS=$(git ls-files  | grep -E '(^|/)fetch_news\.py$'        || true)
+          REPORT=$(git ls-files| grep -E '(^|/)report_builder\.py$'    || true)
 
-      - name: Detect new signals & build message
-        id: find_report
-        run: |
-          set -e
-          latest="$(ls -1 data/reports/insider_signals_*.csv 2>/dev/null | tail -n 1 || true)"
-          if [ -z "$latest" ]; then
-            echo "found=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          echo "fetch=$FETCH"     >> "$GITHUB_OUTPUT"
+          echo "score=$SCORE"     >> "$GITHUB_OUTPUT"
+          echo "news=$NEWS"       >> "$GITHUB_OUTPUT"
+          echo "report=$REPORT"   >> "$GITHUB_OUTPUT"
+
+          echo "Found:"
+          echo "  FETCH  : $FETCH"
+          echo "  SCORE  : $SCORE"
+          echo "  NEWS   : $NEWS"
+          echo "  REPORT : $REPORT"
+
+          # Soft guard: if all are missing, fail early with a clear message
+          if [[ -z "$FETCH$SCORE$NEWS$REPORT" ]]; then
+            echo "No expected scripts found. Check file names/locations." >&2
+            exit 1
           fi
-          echo "found=true" >> "$GITHUB_OUTPUT"
-          echo "file=$latest" >> "$GITHUB_OUTPUT"
-          # Short WA message text
-          summary="🟢 Insider Monitor: nieuwe signalen · $(basename "$latest")"
-          echo "summary=$summary" >> "$GITHUB_OUTPUT"
-
-      - name: Send WhatsApp via Twilio (only if alert)
-        if: steps.find_report.outputs.found == 'true'
-        run: |
-          python - <<'PY'
-          import os
-          from twilio.rest import Client
-
-          sid   = os.environ["TWILIO_ACCOUNT_SID"]
-          token = os.environ["TWILIO_AUTH_TOKEN"]
-          to    = os.environ["ALERT_TO_INSIDER"]
-
-          # Message from previous step
-          body  = os.environ.get("BODY", "🟢 Insider Monitor: nieuwe signalen")
-          latest = os.environ.get("FILE", "")
-
-          if latest:
-              body = f"{body}\n{latest}"
-
-          client = Client(sid, token)
-          msg = client.messages.create(
-              from_="whatsapp:+14155238886",  # Twilio WhatsApp SANDBOX number
-              to=to,
-              body=body
-          )
-          print("✅ WhatsApp verzonden. SID:", msg.sid)
-          PY
-        env:
-          BODY: ${{ steps.find_report.outputs.summary }}
-          FILE: ${{ steps.find_report.outputs.file }}
-
-      - name: Upload reports (optional)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: reports
-          path: data/reports/**
