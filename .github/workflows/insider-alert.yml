@@ -8,112 +8,140 @@ on:
 jobs:
   alert:
     runs-on: ubuntu-latest
-
     steps:
+      # 1) Checkout
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 2) Python 3.11
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # 3) Dependencies  ⟵ HIER zit de fix (PyYAML erbij)
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # Probeer requirements.txt indien aanwezig (fout negeren als hij er niet is)
+          if [ -f requirements.txt ]; then pip install -r requirements.txt || true; fi
+          # Zorg dat deze libs zeker aanwezig zijn
+          pip install pyyaml twilio pandas requests numpy
 
+      # 4) config.local.yaml voorbereiden (leest env secrets → YAML)
       - name: Prepare config.local.yaml
         env:
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
         run: |
-          set -e
-          # Als er een config.yaml is, maak een lokale kopie die we kunnen aanpassen
-          if [ -f config.yaml ]; then cp -f config.yaml config.local.yaml; fi
           python - <<'PY'
           import os, yaml
-          p='config.local.yaml'
-          cfg={}
-          if os.path.exists(p):
-              cfg=yaml.safe_load(open(p)) or {}
-          ua=os.getenv('SEC_USER_AGENT')
+          cfg_path = "config.local.yaml"
+          cfg = {}
+          if os.path.exists(cfg_path):
+              with open(cfg_path) as f:
+                  cfg = yaml.safe_load(f) or {}
+          ua = os.getenv("SEC_USER_AGENT")
           if ua:
-              cfg.setdefault('user_agent', {})['ua']=ua
-          yaml.safe_dump(cfg, open(p,'w'), sort_keys=False, allow_unicode=True)
-          print("✅ config.local.yaml geschreven/bijgewerkt")
+              cfg.setdefault("user_agent", {})["ua"] = ua
+          with open(cfg_path, "w") as f:
+              yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
+          print("✅ config.local.yaml geschreven")
           PY
 
+      # (optioneel) directory dump om paden te debuggen
       - name: Debug repo layout
         run: |
-          echo "PWD: $(pwd)"
-          echo "ROOT:"
-          ls -la
-          echo "SCRIPTS (root):"
-          ls -la scripts || true
-          echo "SCRIPTS (insider-monitor/):"
-          ls -la insider-monitor/scripts || true
+          set -x
+          pwd
+          ls -lah
+          ls -lah scripts || true
+          ls -lah insider-monitor || true
+          ls -lah insider-monitor/scripts || true
 
+      # 5) Draai de insider-pipeline scripts
       - name: Run insider pipeline
-        env:
-          PYTHONUNBUFFERED: "1"
         run: |
           set -e
-          if [ -d scripts ]; then BASE=scripts
-          elif [ -d insider-monitor/scripts ]; then BASE=insider-monitor/scripts
+          BASE="."
+          if [ -d "scripts" ]; then
+            SRC="scripts"
+          elif [ -d "insider-monitor/scripts" ]; then
+            BASE="insider-monitor"
+            SRC="insider-monitor/scripts"
           else
-            echo "❌ Geen scripts/ map gevonden"; exit 2
+            echo "❌ Kan scripts-map niet vinden"; exit 1
           fi
-          python "$BASE/fetch_insiders.py" --days 1 --config config.local.yaml
-          python "$BASE/score_signals.py"   --config config.local.yaml
-          python "$BASE/fetch_news.py"      --config config.local.yaml
-          python "$BASE/report_builder.py"  --config config.local.yaml
+          python "$SRC/fetch_insiders.py" --days 1 --config "$BASE/config.local.yaml"
+          python "$SRC/score_signals.py"  --config "$BASE/config.local.yaml"
+          python "$SRC/fetch_news.py"     --config "$BASE/config.local.yaml"
+          python "$SRC/report_builder.py" --config "$BASE/config.local.yaml"
 
+      # 6) Bepaal of er alert is en bouw boodschap
       - name: Detect new signals & build message
-        id: buildmsg
+        id: detect
         run: |
           set -e
-          REPORT_CSV=$(ls -1 data/reports/insider_signals_*.csv 2>/dev/null | tail -n1 || true)
-          REPORT_MD=$(ls -1 data/reports/report_*.md 2>/dev/null | tail -n1 || true)
+          MSG="Geen nieuwe insider-signalen."
+          HAS=false
 
-          if [ -n "$REPORT_CSV" ] && [ -s "$REPORT_CSV" ]; then
-            MSG="🔥 Insider Monitor: nieuwe signalen gevonden. Zie rapport: ${REPORT_CSV##*/}"
-            echo "message=$MSG"       >> "$GITHUB_OUTPUT"
-            echo "HAS_ALERT=true"     >> "$GITHUB_OUTPUT"
-          elif [ -n "$REPORT_MD" ] && [ -s "$REPORT_MD" ]; then
-            MSG="📰 Insider Monitor: nieuw rapport ${REPORT_MD##*/}"
-            echo "message=$MSG"       >> "$GITHUB_OUTPUT"
-            echo "HAS_ALERT=true"     >> "$GITHUB_OUTPUT"
-          else
-            echo "message=ℹ️ Insider Monitor: geen nieuwe signalen." >> "$GITHUB_OUTPUT"
-            echo "HAS_ALERT=false"    >> "$GITHUB_OUTPUT"
+          # Pas dit pad aan als jouw pipeline elders schrijft:
+          REPORT="data/reports/insider_signals_latest.csv"
+          if [ ! -f "$REPORT" ]; then
+            # fallback paden die je repo mogelijk gebruikt
+            if [ -f "data/reports/insider_signals_$(date -u +%Y-%m-%d).csv" ]; then
+              REPORT="data/reports/insider_signals_$(date -u +%Y-%m-%d).csv"
+            elif [ -f "data/reports/insider_signals_*.csv" ]; then
+              REPORT=$(ls -1t data/reports/insider_signals_*.csv | head -n1)
+            fi
           fi
 
+          if [ -f "$REPORT" ]; then
+            LINES=$( (wc -l < "$REPORT") || echo 0 )
+            if [ "$LINES" -gt 1 ]; then
+              HAS=true
+              MSG="📈 Nieuwe insider-activiteit gedetecteerd.\nBestand: $REPORT\nRegels: $LINES"
+            fi
+          fi
+
+          echo "HAS_ALERT=$HAS" >> $GITHUB_OUTPUT
+          echo "TEXT<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$MSG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # 7) Stuur WhatsApp (alleen bij alert)
       - name: Send WhatsApp via Twilio (only if alert)
-        if: steps.buildmsg.outputs.HAS_ALERT == 'true'
+        if: steps.detect.outputs.HAS_ALERT == 'true'
         env:
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
           TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
-          ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}
-          MSG:                ${{ steps.buildmsg.outputs.message }}
+          ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}  # bv. whatsapp:+316...
         run: |
           python - <<'PY'
           import os
           from twilio.rest import Client
-          sid=os.environ.get("TWILIO_ACCOUNT_SID")
-          token=os.environ.get("TWILIO_AUTH_TOKEN")
-          to=os.environ.get("ALERT_TO_INSIDER")
-          msg_text=os.environ.get("MSG")
+
+          sid   = os.environ.get("TWILIO_ACCOUNT_SID")
+          token = os.environ.get("TWILIO_AUTH_TOKEN")
+          to    = os.environ.get("ALERT_TO_INSIDER")
+
           if not (sid and token and to):
               raise SystemExit("❌ Secrets ontbreken (SID/TOKEN/TO)")
-          client=Client(sid, token)
+
+          client = Client(sid, token)
+          body = """🚨 Insider Monitor Alert
+
+          ${TEXT}
+          """
+          # In SANDBOX: from_ blijft het Twilio sandbox-nummer
           msg = client.messages.create(
-              from_="whatsapp:+14155238886",  # Twilio WhatsApp SANDBOX afzender
-              to=to,                          # bv. whatsapp:+31652...
-              body=msg_text
+              from_="whatsapp:+14155238886",
+              to=to,
+              body=body
           )
           print("✅ WhatsApp verzonden! SID:", msg.sid)
           PY
 
+      # 8) Artefacts (optioneel) – je kunt ze via de run downloaden
       - name: Upload reports (optional)
         if: always()
         uses: actions/upload-artifact@v4
@@ -122,3 +150,4 @@ jobs:
           path: |
             data/reports/**
             data/history/**
+            **/reports/**
