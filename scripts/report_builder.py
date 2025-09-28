@@ -1,46 +1,65 @@
 #!/usr/bin/env python3
-from __future__ import annotations
-import json, sys, datetime as dt
+"""
+Report Builder: combineert insider signalen met nieuws en bouwt een samenvatting.
+"""
+
+import json
+import datetime as dt
 from pathlib import Path
-from typing import Dict, Any, List
 
-SIG_DIR = Path("data/signals")
-NEWS_DIR = Path("data/news")
-REP_DIR = Path("data/reports")
-LOG_DIR = Path("data/logs")
-REP_DIR.mkdir(parents=True, exist_ok=True)
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+BASE = Path("data") / "insider-monitor"
+REP_DIR = BASE / "reports"
 
-def latest(path: Path) -> Path | None:
-    if not path.exists(): return None
-    c = sorted(path.glob("*.json"))
-    return c[-1] if c else None
+def ensure_dir(d: Path) -> None:
+    d.mkdir(parents=True, exist_ok=True)
 
-def load_json(path: Path | None) -> Dict[str, Any]:
-    if not path or not path.exists(): return {}
+def latest(subdir: Path, fname: str) -> Path | None:
+    """Vind laatste bestand in subdir."""
+    if not subdir.exists():
+        return None
+    files = sorted(subdir.glob(fname), reverse=True)
+    return files[0] if files else None
+
+def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
-def build_summary(signals: List[Dict[str, Any]], news_map: Dict[str, List[str]]) -> str:
-    if not signals: return "Geen nieuwe insider-signalen."
-    lines = ["📣 Insider Monitor – nieuwe signalen"]
-    for s in signals[:6]:
-        t = (s.get("ticker") or "").upper(); score = s.get("score"); who = s.get("insider") or "insider"; typ = s.get("type") or "BUY"; ref = s.get("ref_date") or "—"
-        lines.append(f"• {t} ({typ}) score {score} – {who}, {ref}")
-        heads = news_map.get(t) or []
-        if heads: lines.append(f"    📰 {heads[0]}")
-    if len(signals) > 6: lines.append(f"… en {len(signals) - 6} meer.")
-    lines.append("—"); lines.append("⚠️ Demo-tekst – vervang met jouw format/regles.")
+def build_summary(signals: list[dict], news: list[dict]) -> str:
+    lines = []
+    for s in signals[:5]:  # max 5 signalen
+        who = s.get("reporting_owner", "Onbekend")
+        score = s.get("score", "?")
+        ref = s.get("ref_date", "-")
+        lines.append(f"Insider: {who}, Score: {score}, Ref: {ref}")
+    if not signals:
+        lines.append("Geen insider signalen gevonden.")
+
+    if news:
+        lines.append("\nRecent nieuws:")
+        for n in news[:3]:  # max 3 nieuwsberichten
+            lines.append(f"- {n.get('headline')} ({n.get('ticker', '-')})")
+    else:
+        lines.append("\nGeen nieuws gevonden.")
+
     return "\n".join(lines)
 
 def main() -> int:
-    sig_path = latest(SIG_DIR); news_path = latest(NEWS_DIR)
-    signals = load_json(sig_path).get("signals", []); news_map = (load_json(news_path).get("tickers", {}) if news_path else {})
-    summary = build_summary(signals, news_map)
-    out_path = REP_DIR / "summary.txt"; out_path.write_text(summary, encoding="utf-8")
-    ts = dt.datetime.utcnow().isoformat(timespec="seconds")+"Z"
-    (LOG_DIR / "report_builder.log").write_text(f"[{ts}] wrote summary ({len(summary)} chars) -> {out_path}\n", encoding="utf-8")
-    print("SUMMARY:" + summary.replace("\n", "\\n"))
+    # paden
+    sig_file = latest(BASE, "*/scored.json")
+    news_file = latest(BASE, "*/news.json")
+
+    signals = load_json(sig_file).get("signals", []) if sig_file else []
+    news = load_json(news_file).get("news", []) if news_file else []
+
+    summary = build_summary(signals, news)
+
+    # opslaan
+    ensure_dir(REP_DIR)
+    ts = dt.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    out_file = REP_DIR / f"summary_{ts}.txt"
+    out_file.write_text(summary, encoding="utf-8")
+
+    print("RAPPORT GEBOUWD:\n", summary)
     return 0
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())
