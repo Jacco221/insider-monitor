@@ -1,91 +1,90 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Fetch recente Form 4 (insider) filings vanaf:
-  https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&count=100&owner=only
-We pakken per rij: company, CIK, datum/tijd en de filing-URL.
-Schrijven naar: data/insider-monitor/<timestamp>/signals.json
+Haal recente Form 4 (insider transactions) uit de SEC Atom feed en schrijf
+insider 'signals' naar data/insider-monitor/<timestamp>/signals.json
 """
 
-from __future__ import annotations
-import os, json, datetime as dt
+import os, re, json, datetime as dt
 from pathlib import Path
-from typing import List, Dict, Any
-
 import requests
 from bs4 import BeautifulSoup
 
-BASE = Path("data") / "insider-monitor"
-SEC_URL = "https://www.sec.gov/cgi-bin/browse-edgar"
-HEADERS = {
-    "User-Agent": os.getenv("SEC_USER_AGENT", "insider-monitor/1.0 (contact: you@example.com)")
-}
+BASE = Path("data/insider-monitor")
+BASE.mkdir(parents=True, exist_ok=True)
 
-def ts() -> str:
-    return dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-
-def ensure_dir(p: Path) -> None:
+def ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
 
-def fetch_current_form4() -> List[Dict[str, Any]]:
-    params = {
-        "action": "getcurrent",
-        "type": "4",
-        "count": "100",
-        "owner": "only"
+def ts() -> str:
+    return dt.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+
+def user_agent() -> str:
+    return os.getenv("SEC_USER_AGENT", "insider-monitor (contact: example@example.com)")
+
+def fetch_atom(max_count: int = 100) -> str:
+    url = ("https://www.sec.gov/cgi-bin/browse-edgar"
+           "?action=getcurrent&type=4&owner=only&count=%d&output=atom") % max_count
+    headers = {
+        "User-Agent": user_agent(),
+        "Accept": "application/atom+xml,application/xml;q=0.9,*/*;q=0.8",
     }
-    r = requests.get(SEC_URL, params=params, headers=HEADERS, timeout=30)
+    r = requests.get(url, headers=headers, timeout=30)
     r.raise_for_status()
+    return r.text
 
-    soup = BeautifulSoup(r.text, "html.parser")
-    table = soup.select_one("table.tableFile2")
-    if not table:
-        return []
+def parse_atom(xml_text: str):
+    soup = BeautifulSoup(xml_text, "xml")
+    entries = soup.find_all("entry")
+    signals = []
 
-    rows = table.find_all("tr")
-    out: List[Dict[str, Any]] = []
-    for tr in rows[1:]:
-        tds = tr.find_all("td")
-        if len(tds) < 4:
-            continue
+    for e in entries:
+        updated = (e.find("updated").text or "").strip() if e.find("updated") else ""
+        link = e.find("link")
+        href = link["href"].strip() if link and link.has_attr("href") else ""
+        title = (e.find("title").text or "").strip() if e.find("title") else ""
+        raw = e.find("content").text if e.find("content") else ""
 
-        form_txt = tds[0].get_text(strip=True)
-        if not form_txt.startswith("4"):
-            continue
+        def rx(tag):
+            m = re.search(fr"<{tag}>(.*?)</{tag}>", raw or "", re.IGNORECASE | re.DOTALL)
+            return m.group(1).strip() if m else ""
 
-        a = tr.find("a", href=True)
-        filing_url = ("https://www.sec.gov" + a["href"]) if a else None
+        filing_href = rx("filing-href") or href
+        company_name = rx("company-name") or title
+        reporting_owner = rx("reporting-owner")
+        filing_date = rx("filing-date") or updated[:10]
 
-        out.append({
+        s = {
             "type": "insider",
-            "form": form_txt,
-            "company": tds[1].get_text(" ", strip=True),
-            "cik": tds[2].get_text(" ", strip=True),
-            "ref_date": tds[3].get_text(" ", strip=True),
-            "filing_url": filing_url,
-            "who": "Form 4 filer",
-            "ticker": None,
-            "score": 1
-        })
-    return out
+            "who": reporting_owner or "Unknown",
+            "company": company_name or "Unknown",
+            "ref_date": filing_date,
+            "ref": filing_href or href,
+            "raw_title": title,
+            "score": 1,
+        }
+        signals.append(s)
+
+    return signals
 
 def main() -> int:
-    signals = fetch_current_form4()
-    stamp = ts()
-    out_dir = BASE / stamp
-    ensure_dir(out_dir)
+    xml = fetch_atom(max_count=100)
+    signals = parse_atom(xml)
 
+    out_dir = BASE / ts()
+    ensure_dir(out_dir)
     payload = {
         "meta": {
-            "source": "sec-current-form4",
+            "source": "sec-atom-form4",
             "generated": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "count": len(signals),
         },
         "signals": signals,
-        "tickers": {}
+        "tickers": {},
     }
-
-    (out_dir / "signals.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    print(f"OK: {len(signals)} Form 4 items → {out_dir/'signals.json'}")
+    out = out_dir / "signals.json"
+    out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    print(f"OK: {len(signals)} Form 4 items -> {out}")
     return 0
 
 if __name__ == "__main__":
