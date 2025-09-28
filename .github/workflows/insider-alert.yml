@@ -1,7 +1,7 @@
 name: Insider Alerts (WhatsApp)
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
   schedule:
     - cron: "*/30 * * * *"   # elke 30 minuten
 
@@ -11,6 +11,12 @@ permissions:
 jobs:
   alert:
     runs-on: ubuntu-latest
+
+    env:
+      # Twilio secrets moeten in repo Settings → Secrets and variables → Actions staan
+      TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+      TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
+      ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}  # bijv. "whatsapp:+31652615803"
 
     steps:
       - name: Checkout
@@ -23,156 +29,115 @@ jobs:
 
       - name: Install dependencies (requirements + runtime)
         run: |
-          set -euxo pipefail
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          # runtime deps we zeker nodig hebben
-          pip install pyyaml twilio
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          # Zorg dat we twilio en yaml altijd hebben
+          pip install twilio pyyaml
+
+      - name: Prepare config.local.yaml (best effort)
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, yaml, pathlib
+          p = pathlib.Path("config.local.yaml")
+          if not p.exists():
+              with open(p, "w") as f:
+                  yaml.safe_dump({}, f)
+              print("✓ config.local.yaml aangemaakt")
+          else:
+              # voeg desnoods user-agent toe als veld bestaat
+              try:
+                  with open(p) as fr:
+                      cfg = yaml.safe_load(fr) or {}
+                  if "user_agent" not in cfg:
+                      cfg["user_agent"] = os.getenv("SEC_USER_AGENT","")
+                      with open(p,"w") as fw:
+                          yaml.safe_dump(cfg, fw, sort_keys=False, allow_unicode=True)
+                      print("✓ config.local.yaml geüpdatet")
+                  else:
+                      print("✓ config.local.yaml aanwezig")
+              except Exception as e:
+                  print("! kon config.local.yaml niet verwerken:", e)
+          PY
 
       - name: Debug repo layout (top)
         run: |
-          set -euxo pipefail
-          echo "PWD=$(pwd)"
-          echo "------ top-level ------"
+          echo "Top-level:"
           ls -lah
-          echo "------ ./scripts ------"
-          ls -lah scripts || true
-          echo "------ ./insider-monitor ------"
-          ls -lah insider-monitor || true
-          echo "------ ./insider-monitor/scripts ------"
-          ls -lah insider-monitor/scripts || true
-          echo "------ python files (maxdepth 3) ------"
-          find . -maxdepth 3 -type f -name "*.py" -print | sort
+          echo "----"
+          [ -d data/reports ] && ls -lah data/reports || true
 
-      - name: Prepare config.local.yaml
-        env:
-          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+      - name: Run pipeline (run.py)
         run: |
-          set -euxo pipefail
-          # maak config.local.yaml als hij er nog niet is
-          if [ ! -f config.local.yaml ] && [ -f config.yaml ]; then
-            cp config.yaml config.local.yaml
-          fi
-          python - <<'PY'
-          import os, yaml
-          p='config.local.yaml'
-          cfg={}
-          if os.path.exists(p):
-              try:
-                  cfg = yaml.safe_load(open(p)) or {}
-              except Exception:
-                  cfg = {}
-          ua=os.getenv('SEC_USER_AGENT')
-          if ua:
-              cfg.setdefault('user_agent', {})['ua']=ua
-          with open(p,'w') as f:
-              yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
-          print("✅ config.local.yaml OK")
-          PY
+          set -e
+          # Als run.py CLI-args vereist, zet ze hier. Voor nu: zonder args.
+          python run.py || python3 run.py
 
-      - name: Locate scripts dynamically
-        id: loc
-        shell: bash
+      - name: Locate newest insider_signals report
+        id: find_report
         run: |
           set -euo pipefail
-
-          need=(fetch_insiders.py score_signals.py fetch_news.py report_builder.py)
-
-          found_all=true
-          for n in "${need[@]}"; do
-            # zoek het script ergens binnen de repo (beperk diepte om performance te houden)
-            path="$(git ls-files | grep -E "(^|/)${n}$" || true)"
-            if [ -z "$path" ]; then
-              path="$(find . -maxdepth 4 -type f -name "${n}" -print -quit || true)"
-            fi
-            if [ -n "$path" ]; then
-              echo "::notice title=Found::${n} => ${path}"
-              # schrijf als output key met dezelfde naam maar zonder .py
-              key="${n%.py}"
-              echo "${key}=${path}" >> "$GITHUB_OUTPUT"
-            else
-              echo "::error title=Missing script::Kon ${n} niet vinden in de repo."
-              found_all=false
-            fi
-          done
-
-          if [ "$found_all" != "true" ]; then
-            echo "------ extra debug: top-level tree ------"
-            ls -lah
-            echo "------ python files (maxdepth 4) ------"
-            find . -maxdepth 4 -type f -name "*.py" -print | sort
-            exit 1
+          shopt -s nullglob
+          files=(data/reports/insider_signals_*.csv)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "found=no" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # pak nieuwste op mtime
+          newest="$(ls -t data/reports/insider_signals_*.csv | head -n1)"
+          echo "Newest report: $newest"
+          # minimaal 2 regels? (header + 1 record)
+          lines=$(wc -l < "$newest" | tr -d ' ')
+          echo "lines=$lines"
+          if [ "$lines" -ge 2 ]; then
+            echo "found=yes"   >> "$GITHUB_OUTPUT"
+            echo "path=$newest" >> "$GITHUB_OUTPUT"
+            # bouw een korte samenvatting (eerste paar regels)
+            summary="$(head -n 5 "$newest" | sed 's/|/,/g' | tr -d '\r')"
+            # maskeer nieuwe regels voor output
+            summary_one_line="$(printf "%s" "$summary" | paste -sd ' | ' -)"
+            echo "summary=$summary_one_line" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=no" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Run insider pipeline
-        shell: bash
-        run: |
-          set -euxo pipefail
-          python "${{ steps.loc.outputs.fetch_insiders }}" --days 1 --config config.local.yaml
-          python "${{ steps.loc.outputs.score_signals }}"  --config config.local.yaml
-          python "${{ steps.loc.outputs.fetch_news }}"     --config config.local.yaml
-          python "${{ steps.loc.outputs.report_builder }}" --config config.local.yaml
-
-      - name: Detect new signals & build message
-        id: detect
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import glob, os, csv, sys
-          files = sorted(glob.glob('data/reports/insider_signals_*.csv'),
-                         key=os.path.getmtime, reverse=True)
-          alert = False
-          message = "Geen nieuwe insider-signalen gevonden."
-          if files:
-              f = files[0]
-              try:
-                  with open(f, newline='') as fh:
-                      rows = list(csv.reader(fh))
-                  n = max(len(rows)-1, 0)
-                  if n > 0:
-                      alert = True
-                      message = f"✅ {n} nieuw(e) insider-signaal/signalen. Zie rapport: {f}"
-              except Exception as e:
-                  message = f"⚠️ Kon rapport niet lezen: {e}"
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as g:
-              g.write(f"alert={'true' if alert else 'false'}\n")
-              g.write(f"message={message}\n")
-          print("MESSAGE:", message)
-          PY
-
-      - name: Send WhatsApp via Twilio (only if alert)
-        if: steps.detect.outputs.alert == 'true'
+      - name: Send WhatsApp via Twilio (only if new)
+        if: steps.find_report.outputs.found == 'yes'
         env:
-          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
-          TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
-          ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }} # bv: whatsapp:+31652615803
+          SID:   ${{ env.TWILIO_ACCOUNT_SID }}
+          TOKEN: ${{ env.TWILIO_AUTH_TOKEN }}
+          TO:    ${{ env.ALERT_TO_INSIDER }}
         run: |
-          set -euxo pipefail
           python - <<'PY'
           import os
           from twilio.rest import Client
-          sid = os.getenv("TWILIO_ACCOUNT_SID")
-          tok = os.getenv("TWILIO_AUTH_TOKEN")
-          to  = os.getenv("ALERT_TO_INSIDER")
-          msg = """${{ steps.detect.outputs.message }}"""
-          if not all([sid, tok, to]):
-              raise SystemExit("❌ Missing Twilio env vars (TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN/ALERT_TO_INSIDER)")
-          client = Client(sid, tok)
-          m = client.messages.create(
-              from_="whatsapp:+14155238886",   # Twilio SANDBOX
-              to=to,
-              body=f"📣 Insider Monitor alert\n{msg}"
-          )
-          print("✅ WhatsApp sent, SID:", m.sid)
-          PY
 
-      - name: Upload reports (download als artifact)
+          sid   = os.environ.get("SID")
+          token = os.environ.get("TOKEN")
+          to    = os.environ.get("TO")
+          body  = os.environ.get("BODY","")
+          if not sid or not token or not to:
+              raise SystemExit("Twilio env vars ontbreken (SID/TOKEN/TO)")
+
+          msg = Client(sid, token).messages.create(
+              from_="whatsapp:+14155238886",  # Twilio WhatsApp SANDBOX nummer
+              to=to,
+              body=body,
+          )
+          print("✓ WhatsApp verzonden, SID:", msg.sid)
+          PY
+        env:
+          BODY: |
+            ✅ Insider Monitor: nieuwe signals gedetecteerd.
+            Samenvatting: ${{ steps.find_report.outputs.summary }}
+
+      # (Optioneel) upload rapporten als artifact om te downloaden via Actions UI
+      - name: Upload reports (optional)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: reports
-          path: |
-            data/reports/**
-            data/reports/history/**
-            data/reports/*.csv
-            data/reports/*.md
+          path: data/reports/**
+          if-no-files-found: ignore
