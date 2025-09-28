@@ -1,123 +1,81 @@
 name: Insider Alerts (WhatsApp)
 
 on:
-  workflow_dispatch: {}   # <-- hierdoor zie je én kun je 'Run workflow' gebruiken
+  workflow_dispatch: {}           # handmatig starten mogelijk
   schedule:
-    - cron: "*/30 * * * *"  # elke 30 minuten
+    - cron: "*/30 * * * *"        # elke 30 minuten
 
 jobs:
   alert:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Python 3.11
+      - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Installeer dependencies (requirements + runtime)
+      - name: Installeer dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install twilio pyyaml
+          pip install -r requirements.txt
+          pip install twilio
 
-      - name: (optioneel) config.local.yaml bijwerken met user-agent secret
-        if: ${{ secrets.SEC_USER_AGENT != '' }}
-        run: |
-          python - <<'PY'
-          import os, yaml, pathlib
-          p = pathlib.Path('config.local.yaml')
-          cfg = {}
-          if p.exists():
-              with p.open('r') as f:
-                  cfg = yaml.safe_load(f) or {}
-          ua = os.getenv('SEC_USER_AGENT')
-          if ua:
-              cfg.setdefault('user_agent', {})['ua'] = ua
-              with p.open('w') as f:
-                  yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
-              print("config.local.yaml bijgewerkt")
-          PY
-
-      - name: Zoek scripts-map (auto-discover)
-        id: find_scripts
+      - name: Toon repo layout (debug)
         run: |
           set -euo pipefail
-          # kandidaten in volgorde:
-          for d in scripts insider-monitor/src src; do
-            if [ -d "$d" ]; then
-              echo "prefix=$d" >> $GITHUB_OUTPUT
-              break
-            fi
-          done
-          echo "Gevonden prefix: '${{ steps.find_scripts.outputs.prefix || '' }}'"
+          echo "== TOP =="
+          ls -l
+          echo "== scripts =="
+          ls -l scripts || true
 
-      - name: Draai insider pipeline (dummy run ok)
+      - name: Draai insider pipeline (dummy scripts ok)
         run: |
           set -euo pipefail
-          PFX="${{ steps.find_scripts.outputs.prefix }}"
-          if [ -z "${PFX}" ]; then
-            echo "Kon scripts/* niet vinden in ., insider-monitor of src"
-            exit 1
-          fi
-          echo "== Inhoud van ${PFX} =="
-          ls -la "${PFX}"
-          echo "== Try run =="
-          python "${PFX}/fetch_insiders.py" || true
-          python "${PFX}/score_signals.py" || true
-          python "${PFX}/fetch_news.py"   || true
-          python "${PFX}/report_builder.py" || true
-          echo "DONE (dummy run toegestaan)"
+          python scripts/fetch_insiders.py
+          python scripts/score_signals.py
+          python scripts/fetch_news.py
+          python scripts/report_builder.py
 
       - name: Detecteer nieuwe signalen & bouw samenvatting
-        id: build_report
+        id: find_report
         run: |
-          set -euo pipefail
-          # Dummy: maak altijd een korte samenvatting
-          SUMMARY="✅ Insider Monitor: dummy samenvatting (placeholder)"
-          echo "summary=${SUMMARY}" >> $GITHUB_OUTPUT
+          echo "Samenvatting=Insider pipeline succesvol gedraaid" >> "$GITHUB_OUTPUT"
 
-      - name: Verstuur WhatsApp via Twilio (alleen bij alert)
-        if: ${{ steps.build_report.outputs.summary != '' && secrets.TWILIO_ACCOUNT_SID != '' && secrets.TWILIO_AUTH_TOKEN != '' && secrets.ALERT_TO_INSIDER != '' }}
+      - name: Stuur WhatsApp via Twilio (alleen bij alert)
+        if: always()
         env:
-          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_SID:         ${{ secrets.TWILIO_SID }}
           TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
-          ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}
+          WHATSAPP_TO:        ${{ secrets.WHATSAPP_TO }}
         run: |
           python - <<'PY'
-          import os, sys
+          import os
           from twilio.rest import Client
 
-          sid   = os.getenv("TWILIO_ACCOUNT_SID")
+          sid   = os.getenv("TWILIO_SID")
           token = os.getenv("TWILIO_AUTH_TOKEN")
-          to    = os.getenv("ALERT_TO_INSIDER")
-          body  = os.getenv("BODY") or "Insider Monitor test (GitHub Actions)."
+          to    = os.getenv("WHATSAPP_TO")
 
           if not sid or not token or not to:
-              print("❌ Secrets ontbreken (SID/TOKEN/TO)")
-              sys.exit(1)
+              raise SystemExit("Twilio secrets ontbreken (TWILIO_SID / TWILIO_AUTH_TOKEN / WHATSAPP_TO)")
 
+          body = "✅ Insider Monitor: nieuwe run voltooid."
           client = Client(sid, token)
           msg = client.messages.create(
-              from_="whatsapp:+14155238886",   # Twilio sandbox
+              from_="whatsapp:+14155238886",  # Twilio Sandbox
               to=to,
-              body=body,
+              body=body
           )
-          print("✅ WhatsApp verstuurd, SID:", msg.sid)
+          print("WhatsApp verzonden, SID:", msg.sid)
           PY
-        env:
-          BODY: ${{ steps.build_report.outputs.summary }}
 
-      # (optioneel) upload rapporten als artifact
       - name: Upload rapporten (optioneel)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: reports
-          path: |
-            data/reports/**
-            reports/**
-            **/reports/**
-
+          path: data/reports/
