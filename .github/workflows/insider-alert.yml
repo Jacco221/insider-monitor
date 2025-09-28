@@ -1,153 +1,131 @@
 name: Insider Alerts (WhatsApp)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
   schedule:
-    - cron: "*/30 * * * *"   # elke 30 minuten (UTC)
+    # Draait elke 30 minuten
+    - cron: "*/30 * * * *"
+
+permissions:
+  contents: read
 
 jobs:
   alert:
     runs-on: ubuntu-latest
+
     steps:
-      # 1) Checkout
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2) Python 3.11
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # 3) Dependencies  ⟵ HIER zit de fix (PyYAML erbij)
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          # Probeer requirements.txt indien aanwezig (fout negeren als hij er niet is)
-          if [ -f requirements.txt ]; then pip install -r requirements.txt || true; fi
-          # Zorg dat deze libs zeker aanwezig zijn
-          pip install pyyaml twilio pandas requests numpy
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # fallback + Twilio/pyyaml zeker installeren
+          pip install pyyaml twilio || true
 
-      # 4) config.local.yaml voorbereiden (leest env secrets → YAML)
       - name: Prepare config.local.yaml
         env:
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
         run: |
+          set -e
+          # kopieer basis-config indien nog niet aanwezig
+          if [ ! -f config.local.yaml ] && [ -f config.yaml ]; then
+            cp config.yaml config.local.yaml
+          fi
           python - <<'PY'
           import os, yaml
-          cfg_path = "config.local.yaml"
+          p='config.local.yaml'
           cfg = {}
-          if os.path.exists(cfg_path):
-              with open(cfg_path) as f:
-                  cfg = yaml.safe_load(f) or {}
-          ua = os.getenv("SEC_USER_AGENT")
+          if os.path.exists(p):
+              cfg = yaml.safe_load(open(p)) or {}
+          ua = os.getenv('SEC_USER_AGENT')
           if ua:
-              cfg.setdefault("user_agent", {})["ua"] = ua
-          with open(cfg_path, "w") as f:
+              cfg.setdefault('user_agent', {})['ua'] = ua
+          with open(p, 'w') as f:
               yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
-          print("✅ config.local.yaml geschreven")
+          print("✅ config.local.yaml updated")
           PY
 
-      # (optioneel) directory dump om paden te debuggen
       - name: Debug repo layout
         run: |
-          set -x
           pwd
           ls -lah
           ls -lah scripts || true
-          ls -lah insider-monitor || true
-          ls -lah insider-monitor/scripts || true
 
-      # 5) Draai de insider-pipeline scripts
+      # BELANGRIJK: paths zijn relatief vanaf repo-root (GEEN dubbele insider-monitor/…)
       - name: Run insider pipeline
         run: |
           set -e
-          BASE="."
-          if [ -d "scripts" ]; then
-            SRC="scripts"
-          elif [ -d "insider-monitor/scripts" ]; then
-            BASE="insider-monitor"
-            SRC="insider-monitor/scripts"
-          else
-            echo "❌ Kan scripts-map niet vinden"; exit 1
-          fi
-          python "$SRC/fetch_insiders.py" --days 1 --config "$BASE/config.local.yaml"
-          python "$SRC/score_signals.py"  --config "$BASE/config.local.yaml"
-          python "$SRC/fetch_news.py"     --config "$BASE/config.local.yaml"
-          python "$SRC/report_builder.py" --config "$BASE/config.local.yaml"
+          python scripts/fetch_insiders.py --days 1 --config config.local.yaml
+          python scripts/score_signals.py  --config config.local.yaml
+          python scripts/fetch_news.py     --config config.local.yaml
+          python scripts/report_builder.py --config config.local.yaml
 
-      # 6) Bepaal of er alert is en bouw boodschap
       - name: Detect new signals & build message
         id: detect
         run: |
-          set -e
-          MSG="Geen nieuwe insider-signalen."
-          HAS=false
+          python - <<'PY'
+          import glob, os, csv
+          files = sorted(
+              glob.glob('data/reports/insider_signals_*.csv'),
+              key=os.path.getmtime, reverse=True
+          )
+          alert = False
+          message = "Geen nieuwe insider-signalen gevonden."
+          if files:
+              f = files[0]
+              try:
+                  with open(f, newline='') as fh:
+                      rows = list(csv.reader(fh))
+                  n = max(len(rows) - 1, 0)  # minus header
+                  if n > 0:
+                      alert = True
+                      message = f"✅ {n} nieuw(e) insider-signaal/signalen. Zie rapport: {f}"
+              except Exception as e:
+                  message = f"⚠️ Kon rapport niet lezen ({e})."
+          with open(os.environ['GITHUB_OUTPUT'],'a') as g:
+              g.write(f"alert={'true' if alert else 'false'}\n")
+              g.write(f"message={message}\n")
+          PY
 
-          # Pas dit pad aan als jouw pipeline elders schrijft:
-          REPORT="data/reports/insider_signals_latest.csv"
-          if [ ! -f "$REPORT" ]; then
-            # fallback paden die je repo mogelijk gebruikt
-            if [ -f "data/reports/insider_signals_$(date -u +%Y-%m-%d).csv" ]; then
-              REPORT="data/reports/insider_signals_$(date -u +%Y-%m-%d).csv"
-            elif [ -f "data/reports/insider_signals_*.csv" ]; then
-              REPORT=$(ls -1t data/reports/insider_signals_*.csv | head -n1)
-            fi
-          fi
-
-          if [ -f "$REPORT" ]; then
-            LINES=$( (wc -l < "$REPORT") || echo 0 )
-            if [ "$LINES" -gt 1 ]; then
-              HAS=true
-              MSG="📈 Nieuwe insider-activiteit gedetecteerd.\nBestand: $REPORT\nRegels: $LINES"
-            fi
-          fi
-
-          echo "HAS_ALERT=$HAS" >> $GITHUB_OUTPUT
-          echo "TEXT<<EOF" >> $GITHUB_OUTPUT
-          echo -e "$MSG" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      # 7) Stuur WhatsApp (alleen bij alert)
       - name: Send WhatsApp via Twilio (only if alert)
-        if: steps.detect.outputs.HAS_ALERT == 'true'
+        if: steps.detect.outputs.alert == 'true'
         env:
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
           TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
-          ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}  # bv. whatsapp:+316...
+          ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}  # bv. whatsapp:+31652615803
         run: |
           python - <<'PY'
           import os
           from twilio.rest import Client
-
-          sid   = os.environ.get("TWILIO_ACCOUNT_SID")
-          token = os.environ.get("TWILIO_AUTH_TOKEN")
-          to    = os.environ.get("ALERT_TO_INSIDER")
-
-          if not (sid and token and to):
-              raise SystemExit("❌ Secrets ontbreken (SID/TOKEN/TO)")
-
-          client = Client(sid, token)
-          body = """🚨 Insider Monitor Alert
-
-          ${TEXT}
-          """
-          # In SANDBOX: from_ blijft het Twilio sandbox-nummer
-          msg = client.messages.create(
-              from_="whatsapp:+14155238886",
+          sid = os.getenv("TWILIO_ACCOUNT_SID")
+          tok = os.getenv("TWILIO_AUTH_TOKEN")
+          to  = os.getenv("ALERT_TO_INSIDER")
+          msg = """${{ steps.detect.outputs.message }}"""
+          if not all([sid, tok, to]):
+              raise SystemExit("❌ Missing Twilio env vars")
+          client = Client(sid, tok)
+          m = client.messages.create(
+              from_="whatsapp:+14155238886",  # Twilio WhatsApp SANDBOX
               to=to,
-              body=body
+              body=f"📣 Insider Monitor alert:\n{msg}"
           )
-          print("✅ WhatsApp verzonden! SID:", msg.sid)
+          print("✅ WhatsApp sent, SID:", m.sid)
           PY
 
-      # 8) Artefacts (optioneel) – je kunt ze via de run downloaden
       - name: Upload reports (optional)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: insider-reports
+          name: reports
           path: |
             data/reports/**
-            data/history/**
-            **/reports/**
+            data/reports/history/**
+            data/reports/*.csv
+            data/reports/*.md
