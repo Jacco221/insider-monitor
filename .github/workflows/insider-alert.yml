@@ -1,13 +1,18 @@
 name: Insider Alerts (WhatsApp)
 
 on:
-  workflow_dispatch: {}        # <-- hierdoor verschijnt "Run workflow" in Actions
+  # handmatig starten via Actions UI
+  workflow_dispatch: {}
+  # automatisch elke 30 minuten
   schedule:
-    - cron: "*/30 * * * *"     # elke 30 minuten
+    - cron: "*/30 * * * *"
 
 jobs:
   alert:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout
@@ -18,75 +23,107 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Installeer minimale deps
+      - name: Installeer dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install twilio
+          # algemene requirements (bestaat al in jouw repo)
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # extra's die we hier zeker nodig hebben
+          pip install twilio pyyaml
 
-      - name: Debug: laat repo zien
+      - name: (Optioneel) config.local.yaml bijwerken met user-agent secret
         run: |
-          echo "== Top-level =="
-          ls -la
-          echo "== data/reports =="
-          ls -la data/reports || true
-          echo "== Recente insider_signals_* =="
-          ls -1t data/reports/*insider_signals*.csv 2>/dev/null | head -n 5 || true
+          python - <<'PY'
+          import os, yaml
+          p = 'config.local.yaml'
+          cfg = {}
+          if os.path.exists(p):
+              cfg = yaml.safe_load(open(p)) or {}
+          ua = os.getenv('SEC_USER_AGENT')
+          if ua:
+              cfg.setdefault('user_agent', {})['ua'] = ua
+              yaml.safe_dump(cfg, open(p, 'w'), sort_keys=False, allow_unicode=True)
+              print("✅ config.local.yaml geschreven")
+          else:
+              print("ℹ️  Geen SEC_USER_AGENT secret gezet (mag)")
+          PY
 
-      - name: Detecteer nieuwe signalen & bouw bericht
-        id: detect
-        shell: bash
+      - name: Zoek scripts-map (fail fast)
+        id: find
         run: |
           set -euo pipefail
-          REPORT=$(ls -1t data/reports/*insider_signals*.csv 2>/dev/null | head -n 1 || true)
-          echo "report=$REPORT" >> "$GITHUB_OUTPUT"
+          prefix=""
+          for cand in "." "insider-monitor" "src"; do
+            if [ -f "$cand/scripts/fetch_insiders.py" ]; then prefix="$cand"; break; fi
+          done
+          echo "GEVONDEN prefix: '$prefix'"
+          if [ -z "$prefix" ]; then
+            echo "❌ Kon 'scripts/*' niet vinden in ., insider-monitor of src"
+            echo "Top-level tree:"
+            ls -la
+            exit 1
+          fi
+          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
 
-          if [[ -n "$REPORT" ]] && [[ $(wc -l < "$REPORT") -gt 1 ]]; then
-            echo "has_alert=true" >> "$GITHUB_OUTPUT"
-            SUMMARY="$(head -n 5 "$REPORT" | tr '\n' ' ' | sed 's/  */ /g')"
-            SUMMARY="${SUMMARY:0:900}"
-            {
-              echo "summary<<EOF"
-              echo "$SUMMARY"
-              echo "EOF"
-            } >> "$GITHUB_OUTPUT"
-            echo "✅ Alert: rapport gevonden: $REPORT"
+      - name: Draai insider pipeline
+        run: |
+          set -e
+          cd "${{ steps.find.outputs.prefix }}"
+          python scripts/fetch_insiders.py --days 1 --config ../config.local.yaml
+          python scripts/score_signals.py  --config ../config.local.yaml
+          python scripts/fetch_news.py    --config ../config.local.yaml
+          python scripts/report_builder.py --config ../config.local.yaml
+
+      - name: Detecteer nieuwe signalen & bouw samenvatting
+        id: report
+        run: |
+          set -e
+          latest=$(ls -1 data/reports/insider_signals_* 2>/dev/null | tail -n1 || true)
+          if [ -n "$latest" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "path=$latest"  >> "$GITHUB_OUTPUT"
+            # heel korte samenvatting (pas aan naar wens)
+            summary=$(head -n 2 "$latest" | tr '\n' ' ')
+            echo "summary=$summary" >> "$GITHUB_OUTPUT"
+            echo "✅ Rapport gevonden: $latest"
           else
-            echo "has_alert=false" >> "$GITHUB_OUTPUT"
-            echo "summary=" >> "$GITHUB_OUTPUT"
-            echo "ℹ️ Geen insider_signals-rapport met data gevonden."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "ℹ️  Geen nieuw insider_signals_ rapport aangetroffen"
           fi
 
-      - name: Stuur WhatsApp via Twilio (alleen bij alert)
-        if: steps.detect.outputs.has_alert == 'true'
+      - name: Verstuur WhatsApp via Twilio (alleen bij alert)
+        if: steps.report.outputs.found == 'true'
         env:
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
-          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
-          TO: ${{ secrets.ALERT_TO_INSIDER }}
-          SUMMARY: ${{ steps.detect.outputs.summary }}
+          TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
+          ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}  # bijv. 'whatsapp:+316xxxxxxx'
+          BODY: ${{ steps.report.outputs.summary }}
         run: |
           python - <<'PY'
           import os
           from twilio.rest import Client
 
-          sid = os.environ["TWILIO_ACCOUNT_SID"]
-          token = os.environ["TWILIO_AUTH_TOKEN"]
-          to = os.environ["TO"]
-          summary = os.environ.get("SUMMARY","").strip()
-          body = ("✅ Insider Monitor: nieuwe signalen. " + summary).strip()
+          sid   = os.environ.get('TWILIO_ACCOUNT_SID')
+          token = os.environ.get('TWILIO_AUTH_TOKEN')
+          to    = os.environ.get('ALERT_TO_INSIDER')
+          body  = os.environ.get('BODY') or "Insider Monitor: nieuwe signalen gedetecteerd."
 
-          msg = Client(sid, token).messages.create(
-              from_="whatsapp:+14155238886",  # Twilio WhatsApp SANDBOX
+          assert sid and token and to, "❌ Twilio secrets ontbreken (SID/TOKEN/TO)"
+
+          client = Client(sid, token)
+          msg = client.messages.create(
+              from_='whatsapp:+14155238886',  # Twilio sandbox sender
               to=to,
               body=body
           )
-          print("Verzonden, SID:", msg.sid)
+          print("✅ WhatsApp verzonden, SID:", msg.sid)
           PY
 
-      - name: Upload rapporten (optioneel)
+      - name: Upload rapporten (artifact) – handig om te downloaden
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: reports
           path: |
+            **/data/reports/**
             data/reports/**
-            *.log
