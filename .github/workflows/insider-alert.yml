@@ -3,8 +3,7 @@ name: Insider Alerts (WhatsApp)
 on:
   workflow_dispatch: {}
   schedule:
-    # elke 30 minuten
-    - cron: "*/30 * * * *"
+    - cron: "*/30 * * * *"   # elke 30 minuten
 
 permissions:
   contents: read
@@ -17,23 +16,40 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies (requirements + runtime)
         run: |
+          set -euxo pipefail
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          # veiligheidsnet
-          pip install pyyaml twilio || true
+          # runtime deps we zeker nodig hebben
+          pip install pyyaml twilio
+
+      - name: Debug repo layout (top)
+        run: |
+          set -euxo pipefail
+          echo "PWD=$(pwd)"
+          echo "------ top-level ------"
+          ls -lah
+          echo "------ ./scripts ------"
+          ls -lah scripts || true
+          echo "------ ./insider-monitor ------"
+          ls -lah insider-monitor || true
+          echo "------ ./insider-monitor/scripts ------"
+          ls -lah insider-monitor/scripts || true
+          echo "------ python files (maxdepth 3) ------"
+          find . -maxdepth 3 -type f -name "*.py" -print | sort
 
       - name: Prepare config.local.yaml
         env:
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
         run: |
-          set -e
+          set -euxo pipefail
+          # maak config.local.yaml als hij er nog niet is
           if [ ! -f config.local.yaml ] && [ -f config.yaml ]; then
             cp config.yaml config.local.yaml
           fi
@@ -42,59 +58,69 @@ jobs:
           p='config.local.yaml'
           cfg={}
           if os.path.exists(p):
-              cfg = yaml.safe_load(open(p)) or {}
+              try:
+                  cfg = yaml.safe_load(open(p)) or {}
+              except Exception:
+                  cfg = {}
           ua=os.getenv('SEC_USER_AGENT')
           if ua:
               cfg.setdefault('user_agent', {})['ua']=ua
           with open(p,'w') as f:
               yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
-          print("✅ config.local.yaml updated")
+          print("✅ config.local.yaml OK")
           PY
 
-      - name: Debug repo layout
-        run: |
-          echo "PWD=$(pwd)"
-          ls -lah
-          echo "--- scripts on root ---"
-          ls -lah scripts || true
-          echo "--- scripts under insider-monitor/ ---"
-          ls -lah insider-monitor/scripts || true
-
-      # Detecteer waar de scripts staan en stel PREFIX in ("" of "insider-monitor/")
-      - name: Resolve script prefix
-        id: pf
+      - name: Locate scripts dynamically
+        id: loc
         shell: bash
         run: |
-          if [ -f scripts/fetch_insiders.py ]; then
-            echo "prefix=" >> "$GITHUB_OUTPUT"
-            echo "Using prefix: (root)"
-          elif [ -f insider-monitor/scripts/fetch_insiders.py ]; then
-            echo "prefix=insider-monitor/" >> "$GITHUB_OUTPUT"
-            echo "Using prefix: insider-monitor/"
-          else
-            echo "Kon scripts niet vinden"
+          set -euo pipefail
+
+          need=(fetch_insiders.py score_signals.py fetch_news.py report_builder.py)
+
+          found_all=true
+          for n in "${need[@]}"; do
+            # zoek het script ergens binnen de repo (beperk diepte om performance te houden)
+            path="$(git ls-files | grep -E "(^|/)${n}$" || true)"
+            if [ -z "$path" ]; then
+              path="$(find . -maxdepth 4 -type f -name "${n}" -print -quit || true)"
+            fi
+            if [ -n "$path" ]; then
+              echo "::notice title=Found::${n} => ${path}"
+              # schrijf als output key met dezelfde naam maar zonder .py
+              key="${n%.py}"
+              echo "${key}=${path}" >> "$GITHUB_OUTPUT"
+            else
+              echo "::error title=Missing script::Kon ${n} niet vinden in de repo."
+              found_all=false
+            fi
+          done
+
+          if [ "$found_all" != "true" ]; then
+            echo "------ extra debug: top-level tree ------"
+            ls -lah
+            echo "------ python files (maxdepth 4) ------"
+            find . -maxdepth 4 -type f -name "*.py" -print | sort
             exit 1
           fi
 
       - name: Run insider pipeline
         shell: bash
         run: |
-          set -e
-          PREF='${{ steps.pf.outputs.prefix }}'
-          python "${PREF}scripts/fetch_insiders.py" --days 1 --config config.local.yaml
-          python "${PREF}scripts/score_signals.py"  --config config.local.yaml
-          python "${PREF}scripts/fetch_news.py"     --config config.local.yaml
-          python "${PREF}scripts/report_builder.py" --config config.local.yaml
+          set -euxo pipefail
+          python "${{ steps.loc.outputs.fetch_insiders }}" --days 1 --config config.local.yaml
+          python "${{ steps.loc.outputs.score_signals }}"  --config config.local.yaml
+          python "${{ steps.loc.outputs.fetch_news }}"     --config config.local.yaml
+          python "${{ steps.loc.outputs.report_builder }}" --config config.local.yaml
 
       - name: Detect new signals & build message
         id: detect
         run: |
+          set -euo pipefail
           python - <<'PY'
-          import glob, os, csv
-          files = sorted(
-              glob.glob('data/reports/insider_signals_*.csv'),
-              key=os.path.getmtime, reverse=True
-          )
+          import glob, os, csv, sys
+          files = sorted(glob.glob('data/reports/insider_signals_*.csv'),
+                         key=os.path.getmtime, reverse=True)
           alert = False
           message = "Geen nieuwe insider-signalen gevonden."
           if files:
@@ -107,10 +133,11 @@ jobs:
                       alert = True
                       message = f"✅ {n} nieuw(e) insider-signaal/signalen. Zie rapport: {f}"
               except Exception as e:
-                  message = f"⚠️ Kon rapport niet lezen ({e})."
-          with open(os.environ['GITHUB_OUTPUT'],'a') as g:
+                  message = f"⚠️ Kon rapport niet lezen: {e}"
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as g:
               g.write(f"alert={'true' if alert else 'false'}\n")
               g.write(f"message={message}\n")
+          print("MESSAGE:", message)
           PY
 
       - name: Send WhatsApp via Twilio (only if alert)
@@ -118,8 +145,9 @@ jobs:
         env:
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
           TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
-          ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}  # bv. whatsapp:+31652615803
+          ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }} # bv: whatsapp:+31652615803
         run: |
+          set -euxo pipefail
           python - <<'PY'
           import os
           from twilio.rest import Client
@@ -128,17 +156,17 @@ jobs:
           to  = os.getenv("ALERT_TO_INSIDER")
           msg = """${{ steps.detect.outputs.message }}"""
           if not all([sid, tok, to]):
-              raise SystemExit("❌ Missing Twilio env vars")
+              raise SystemExit("❌ Missing Twilio env vars (TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN/ALERT_TO_INSIDER)")
           client = Client(sid, tok)
           m = client.messages.create(
-              from_="whatsapp:+14155238886",  # Twilio WhatsApp SANDBOX
+              from_="whatsapp:+14155238886",   # Twilio SANDBOX
               to=to,
-              body=f"📣 Insider Monitor alert:\n{msg}"
+              body=f"📣 Insider Monitor alert\n{msg}"
           )
           print("✅ WhatsApp sent, SID:", m.sid)
           PY
 
-      - name: Upload reports (optional)
+      - name: Upload reports (download als artifact)
         if: always()
         uses: actions/upload-artifact@v4
         with:
