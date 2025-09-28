@@ -1,30 +1,168 @@
+name: Insider Alerts (WhatsApp)
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Elke 30 minuten
+    - cron: "*/30 * * * *"
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Installeer dependencies (requirements + runtime)
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # Zorg dat pyyaml + twilio zeker aanwezig zijn
+          pip install pyyaml twilio
+
+      - name: Prepare config.local.yaml (optioneel)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Maak een lege/standaard config als hij nog niet bestaat.
+          if [ ! -f config.local.yaml ]; then
+            echo "# lokale config (leeg of standaard)" > config.local.yaml
+          fi
+
+      - name: Debug repo layout (top)
+        run: |
+          echo "== Top-level tree =="
+          ls -la
+          echo "== Subfolders =="
+          find . -maxdepth 2 -type d | sort
+
+      # --- BELANGRIJK: scripts niet hard-coden, maar dynamisch vinden ---
       - name: Locate scripts dynamically
         id: find_scripts
         shell: bash
         run: |
           set -euo pipefail
-          echo "Top-level tree:"
-          ls -la
 
-          # Find by filename anywhere in the repo
           FETCH=$(git ls-files | grep -E '(^|/)fetch_insiders\.py$'    || true)
           SCORE=$(git ls-files | grep -E '(^|/)score_signals\.py$'     || true)
           NEWS=$(git ls-files  | grep -E '(^|/)fetch_news\.py$'        || true)
           REPORT=$(git ls-files| grep -E '(^|/)report_builder\.py$'    || true)
 
-          echo "fetch=$FETCH"     >> "$GITHUB_OUTPUT"
-          echo "score=$SCORE"     >> "$GITHUB_OUTPUT"
-          echo "news=$NEWS"       >> "$GITHUB_OUTPUT"
-          echo "report=$REPORT"   >> "$GITHUB_OUTPUT"
+          echo "fetch=$FETCH"   >> "$GITHUB_OUTPUT"
+          echo "score=$SCORE"   >> "$GITHUB_OUTPUT"
+          echo "news=$NEWS"     >> "$GITHUB_OUTPUT"
+          echo "report=$REPORT" >> "$GITHUB_OUTPUT"
 
-          echo "Found:"
+          echo "== GEVONDEN SCRIPTS =="
           echo "  FETCH  : $FETCH"
           echo "  SCORE  : $SCORE"
           echo "  NEWS   : $NEWS"
           echo "  REPORT : $REPORT"
 
-          # Soft guard: if all are missing, fail early with a clear message
+          # Fail fast met duidelijke fout als letterlijk niks wordt gevonden
           if [[ -z "$FETCH$SCORE$NEWS$REPORT" ]]; then
-            echo "No expected scripts found. Check file names/locations." >&2
+            echo "Geen van de verwachte scripts gevonden. Check bestandsnamen/locatie." >&2
             exit 1
           fi
+
+      - name: Run insider pipeline
+        id: run_pipeline
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          run_if_present () {
+            local label="$1"
+            local path="$2"
+            local extra="${3:-}"
+            if [[ -n "$path" ]]; then
+              echo "▶ Running $label: $path"
+              python "$path" --config config.local.yaml $extra
+            else
+              echo "⏭  Skipping $label (not found)"
+            fi
+          }
+
+          FETCH='${{ steps.find_scripts.outputs.fetch }}'
+          SCORE='${{ steps.find_scripts.outputs.score }}'
+          NEWS='${{ steps.find_scripts.outputs.news }}'
+          REPORT='${{ steps.find_scripts.outputs.report }}'
+
+          # Pas evt. flags aan op basis van jouw scripts
+          run_if_present "fetch_insiders" "$FETCH" "--days 1"
+          run_if_present "score_signals"  "$SCORE"
+          run_if_present "fetch_news"     "$NEWS"
+
+          mkdir -p data/reports
+          run_if_present "report_builder" "$REPORT" "--out data/reports"
+
+      - name: Detecteer nieuwe signalen & bouw bericht
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Neem het meest recente insider_signals CSV rapport (als het bestaat)
+          REPORT=$(ls -1 data/reports/*insider_signals*.csv 2>/dev/null | sort | tail -n 1 || true)
+          echo "report=$REPORT" >> "$GITHUB_OUTPUT"
+
+          if [[ -n "$REPORT" ]] && [[ $(wc -l < "$REPORT") -gt 1 ]]; then
+            echo "has_alert=true" >> "$GITHUB_OUTPUT"
+
+            echo "Korte samenvatting (eerste paar regels):"
+            head -n 5 "$REPORT"
+
+            SUMMARY="$(head -n 5 "$REPORT" | tr '\n' ' ' | sed 's/  */ /g')"
+            # Houd het bericht compact (WhatsApp limieten)
+            SUMMARY="${SUMMARY:0:900}"
+
+            {
+              echo "summary<<EOF"
+              echo "$SUMMARY"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "has_alert=false" >> "$GITHUB_OUTPUT"
+            echo "summary=" >> "$GITHUB_OUTPUT"
+            echo "Geen nieuw insider_signals rapport met data gevonden."
+          fi
+
+      - name: Stuur WhatsApp via Twilio (alleen bij alert)
+        if: steps.detect.outputs.has_alert == 'true'
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TO: ${{ secrets.ALERT_TO_INSIDER }}
+          SUMMARY: ${{ steps.detect.outputs.summary }}
+        run: |
+          python - <<'PY'
+          import os
+          from twilio.rest import Client
+
+          sid = os.environ["TWILIO_ACCOUNT_SID"]
+          token = os.environ["TWILIO_AUTH_TOKEN"]
+          to = os.environ["TO"]
+          body = f"✅ Insider Monitor: er zijn nieuwe signalen. {os.environ.get('SUMMARY','')}".strip()
+          client = Client(sid, token)
+          msg = client.messages.create(
+              from_="whatsapp:+14155238886",  # Twilio WhatsApp SANDBOX
+              to=to,
+              body=body
+          )
+          print("Verzonden, SID:", msg.sid)
+          PY
+
+      - name: Upload rapporten (optioneel)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            data/reports/**
+            *.log
