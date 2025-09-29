@@ -1,25 +1,22 @@
-name: Insider Alerts (WhatsApp)
+name: Insider Alerts (WhatsApp) — DEBUG
 
 on:
-  workflow_dispatch:
-    inputs:
-      debug_whatsapp:
-        description: 'Forceer WhatsApp (debug)'
-        required: false
-        default: 'true'   # zet op 'false' als je geen debug wilt
+  workflow_dispatch: {}        # handmatig 'Run workflow' zichtbaar
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "0 * * * *"        # elk uur; mag je weghalen tijdens testen
 
 jobs:
   alert:
     runs-on: ubuntu-latest
 
     env:
-      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+      # Vereist in repo secrets:
+      # - TWILIO_ACCOUNT_SID
+      # - TWILIO_AUTH_TOKEN
+      # - ALERT_TO_INSIDER   (bijv. "whatsapp:+31XXXXXXXXX")
       TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
-      TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
-      WHATSAPP_TO: ${{ secrets.ALERT_TO_INSIDER }}
-      DEBUG_WHATSAPP: ${{ github.event.inputs.debug_whatsapp }}
+      TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
+      ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}
 
     steps:
       - name: Checkout
@@ -30,97 +27,45 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Installeer dependencies
+      - name: Installeer Twilio SDK
         run: |
           python -m pip install --upgrade pip
-          pip install requests lxml beautifulsoup4 twilio
+          pip install twilio
 
-      - name: Toon repo layout (debug)
-        run: ls -lah
-
-      - name: Zoek scripts map (fail fast)
-        run: |
-          set -euo pipefail
-          echo "== ZOEK SCRIPTS =="
-          if [ -d scripts ]; then
-            echo "OK: ./scripts"
-          else
-            echo "FOUT: geen 'scripts' map"; exit 1
-          fi
-          ls -lah scripts
-
-      - name: Draai insider pipeline
-        run: |
-          set -euo pipefail
-          export SEC_USER_AGENT="${SEC_USER_AGENT}"
-
-          echo "== FETCH insiders (SEC) =="
-          python scripts/fetch_insiders.py
-
-          echo "== SCORE signals =="
-          python scripts/score_signals.py
-
-          echo "== FETCH news (dummy) =="
-          python scripts/fetch_news.py
-
-          echo "== BUILD report =="
-          python scripts/report_builder.py
-
-          echo "== Laatste files =="
-          ls -lah data/reports || true
-          tail -50 data/reports/latest.txt || true
-
-      - name: Detecteer nieuwe signalen & bouw samenvatting
-        id: find_report
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f data/reports/latest.txt ]; then
-            echo "found=true" >> $GITHUB_OUTPUT
-          else
-            echo "found=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Stuur WhatsApp via Twilio (alleen bij alert, of altijd in debug)
-        if: steps.find_report.outputs.found == 'true'
+      - name: Stuur WhatsApp test (altijd, debug)
+        # Dit stuurt ALTIJD een bericht, ongeacht data/alerts
         run: |
           python - <<'PY'
-          import os, sys
+          import os, datetime
           from twilio.rest import Client
-          from pathlib import Path
 
-          sid  = os.environ.get("TWILIO_ACCOUNT_SID")
-          tok  = os.environ.get("TWILIO_AUTH_TOKEN")
-          to   = os.environ.get("WHATSAPP_TO")
-          debug = (os.environ.get("DEBUG_WHATSAPP","").lower() == "true")
+          sid   = os.environ.get("TWILIO_ACCOUNT_SID")
+          token = os.environ.get("TWILIO_AUTH_TOKEN")
+          to    = os.environ.get("ALERT_TO_INSIDER")
 
-          if not all([sid, tok, to]):
-            raise SystemExit("Twilio secrets ontbreken (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / ALERT_TO_INSIDER)")
+          # Basis sanity checks (voorkomt 'None' fouten)
+          missing = [k for k,v in {"TWILIO_ACCOUNT_SID":sid,"TWILIO_AUTH_TOKEN":token,"ALERT_TO_INSIDER":to}.items() if not v]
+          if missing:
+              raise SystemExit(f"Ontbrekende secrets: {', '.join(missing)}")
 
-          latest = Path("data/reports/latest.txt").read_text(encoding="utf-8")
-          # “signal aanwezig?” check: heel simpel — komt het woord 'insider' voor
-          is_insider = (" insider " in (" " + latest.lower() + " "))
+          client = Client(sid, token)
 
-          # Als debug, dan altijd sturen. Anders alleen bij insider.
-          if debug or is_insider:
-            head = "\n".join(latest.strip().splitlines()[:12])  # compact
-            prefix = "[DEBUG]" if debug and not is_insider else "ALERT"
-            body = f"{prefix} Insider Alert\n\n{head}\n\n—\n(insider-monitor)"
-            print("Verzend WhatsApp...")
-            Client(sid, tok).messages.create(
-              from_="whatsapp:+14155238886",
-              to=to,
-              body=body
-            )
-            print("OK: WhatsApp verzonden.")
-          else:
-            print("Geen insider signal (en debug=false) — geen WhatsApp verstuurd.")
+          ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+          body = (
+              "🚨 *Insider Monitor – DEBUG*\n"
+              f"De keten werkt! ({ts})\n\n"
+              "Als je dit bericht ontvangt, is Twilio WhatsApp OK ✅\n"
+              "— Repo: insider-monitor\n"
+              "— Workflow: insider-alert.yml"
+          )
+
+          msg = client.messages.create(
+              body=body,
+              from_="whatsapp:+14155238886",  # Twilio Sandbox afzender
+              to=to
+          )
+          print("WhatsApp verzonden, SID:", msg.sid)
           PY
 
-      - name: Upload rapporten (optioneel)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: reports
-          path: data/reports
-          if-no-files-found: warn
+      - name: Klaar
+        run: echo "Debug-WhatsApp verzonden (als secrets & sandbox goed staan)."
