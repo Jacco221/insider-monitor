@@ -1,23 +1,13 @@
-name: Insider Alerts (WhatsApp) — DEBUG
+name: Insider Alerts (WhatsApp)
 
 on:
-  workflow_dispatch: {}        # handmatig 'Run workflow' zichtbaar
+  workflow_dispatch: {}
   schedule:
-    - cron: "0 * * * *"        # elk uur; mag je weghalen tijdens testen
+    - cron: "*/30 * * * *"
 
 jobs:
   alert:
     runs-on: ubuntu-latest
-
-    env:
-      # Vereist in repo secrets:
-      # - TWILIO_ACCOUNT_SID
-      # - TWILIO_AUTH_TOKEN
-      # - ALERT_TO_INSIDER   (bijv. "whatsapp:+31XXXXXXXXX")
-      TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
-      TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
-      ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,45 +17,97 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Installeer Twilio SDK
+      - name: Installeer dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install twilio
+          pip install twilio requests lxml beautifulsoup4
 
-      - name: Stuur WhatsApp test (altijd, debug)
-        # Dit stuurt ALTIJD een bericht, ongeacht data/alerts
+      - name: Haal insiders binnen (SEC Atom)
+        env:
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+        run: python scripts/fetch_insiders.py
+
+      - name: Score insiders
+        run: python scripts/score_signals.py
+
+      - name: Bouw rapport
+        run: python scripts/report_builder.py
+
+      - name: Stuur WhatsApp (altijd bij FORCE_DEBUG=1, anders alleen bij insider)
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
+          ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}
+          FORCE_DEBUG:        ${{ vars.FORCE_DEBUG }}
         run: |
           python - <<'PY'
-          import os, datetime
+          import json, os, sys
+          from pathlib import Path
           from twilio.rest import Client
 
-          sid   = os.environ.get("TWILIO_ACCOUNT_SID")
-          token = os.environ.get("TWILIO_AUTH_TOKEN")
-          to    = os.environ.get("ALERT_TO_INSIDER")
+          base = Path("data/insider-monitor")
+          scored_files = sorted(base.glob("*/scored.json"))
+          news_files   = sorted(base.glob("*/news.json"))
 
-          # Basis sanity checks (voorkomt 'None' fouten)
-          missing = [k for k,v in {"TWILIO_ACCOUNT_SID":sid,"TWILIO_AUTH_TOKEN":token,"ALERT_TO_INSIDER":to}.items() if not v]
-          if missing:
-              raise SystemExit(f"Ontbrekende secrets: {', '.join(missing)}")
+          signals = []
+          if scored_files:
+            data = json.loads(scored_files[-1].read_text())
+            signals = data.get("signals", [])
 
-          client = Client(sid, token)
+          news_items = []
+          if news_files:
+            ndata = json.loads(news_files[-1].read_text())
+            news_items = ndata.get("news", [])
 
-          ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-          body = (
-              "🚨 *Insider Monitor – DEBUG*\n"
-              f"De keten werkt! ({ts})\n\n"
-              "Als je dit bericht ontvangt, is Twilio WhatsApp OK ✅\n"
-              "— Repo: insider-monitor\n"
-              "— Workflow: insider-alert.yml"
-          )
+          has_insider = any(s.get("type")=="insider" and (s.get("score",0) >= 10) for s in signals)
+          force = (os.getenv("FORCE_DEBUG","").strip() == "1")
+          print(f"has_insider={has_insider} force_debug={force}")
 
-          msg = client.messages.create(
+          if not (has_insider or force):
+            print("Geen alert -> WhatsApp niet verstuurd.")
+            sys.exit(0)
+
+          # Binnenkomende kopjes (max 5)
+          heads = []
+          for s in signals:
+            if s.get("type")=="insider":
+              heads.append(s.get("raw_title") or s.get("ref",""))
+            if len(heads) == 5: break
+
+          # Top nieuws
+          top_news = ""
+          if news_items:
+            item = news_items[0]
+            top_news = item.get("headline") or item.get("title") or ""
+
+          lines = ["Insider Monitor alert"]
+          if heads:
+            lines.append("== Top insiders ==")
+            lines += [f"- {h}" for h in heads]
+          if top_news:
+            lines.append("")
+            lines.append("== Laatste nieuws ==")
+            lines.append(f"- {top_news}")
+
+          body = "\n".join(lines)
+
+          sid = os.environ["TWILIO_ACCOUNT_SID"]
+          tok = os.environ["TWILIO_AUTH_TOKEN"]
+          to  = os.environ["ALERT_TO_INSIDER"]
+
+          msg = Client(sid, tok).messages.create(
               body=body,
-              from_="whatsapp:+14155238886",  # Twilio Sandbox afzender
-              to=to
+              from_="whatsapp:+14155238886",
+              to=f"whatsapp:{to}"
           )
-          print("WhatsApp verzonden, SID:", msg.sid)
+          print("WhatsApp verzonden! SID:", msg.sid)
           PY
 
-      - name: Klaar
-        run: echo "Debug-WhatsApp verzonden (als secrets & sandbox goed staan)."
+      - name: Upload rapporten (optioneel)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            data/reports/latest.txt
+            data/reports/summary_*.txt
