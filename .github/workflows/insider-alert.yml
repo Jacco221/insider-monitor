@@ -1,9 +1,7 @@
 name: Insider Alerts (WhatsApp)
 
 on:
-  workflow_dispatch: {}
-  schedule:
-    - cron: "*/30 * * * *"
+  workflow_dispatch:
 
 jobs:
   alert:
@@ -12,94 +10,60 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Python 3.11
+      - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Installeer dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install twilio requests lxml beautifulsoup4
+          pip install -r requirements.txt
+          pip install twilio
 
-      - name: Haal insiders binnen (SEC Atom)
-        env:
-          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
-        run: python scripts/fetch_insiders.py
+      - name: Toon repo layout (debug)
+        run: ls -R
 
-      - name: Score insiders
-        run: python scripts/score_signals.py
+      - name: Zoek scripts map (fail fast)
+        run: test -d scripts
 
-      - name: Bouw rapport
-        run: python scripts/report_builder.py
+      - name: Draai insider pipeline (dummy ok)
+        run: |
+          python scripts/fetch_insiders.py || true
+          python scripts/score_signals.py || true
+          python scripts/fetch_news.py || true
+          python scripts/report_builder.py || true
 
-      - name: Stuur WhatsApp (altijd bij FORCE_DEBUG=1, anders alleen bij insider)
+      - name: Detecteer nieuwe signalen & bouw samenvatting
+        run: |
+          echo "== Laatste rapport =="
+          ls -lh data/reports || true
+          tail -50 data/reports/latest.txt || true
+
+      - name: Stuur WhatsApp via Twilio (debug: altijd sturen)
         env:
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
-          TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
-          ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}
-          FORCE_DEBUG:        ${{ vars.FORCE_DEBUG }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          ALERT_TO_INSIDER: ${{ secrets.ALERT_TO_INSIDER }}
         run: |
           python - <<'PY'
-          import json, os, sys
-          from pathlib import Path
+          import os
           from twilio.rest import Client
-
-          base = Path("data/insider-monitor")
-          scored_files = sorted(base.glob("*/scored.json"))
-          news_files   = sorted(base.glob("*/news.json"))
-
-          signals = []
-          if scored_files:
-            data = json.loads(scored_files[-1].read_text())
-            signals = data.get("signals", [])
-
-          news_items = []
-          if news_files:
-            ndata = json.loads(news_files[-1].read_text())
-            news_items = ndata.get("news", [])
-
-          has_insider = any(s.get("type")=="insider" and (s.get("score",0) >= 10) for s in signals)
-          force = (os.getenv("FORCE_DEBUG","").strip() == "1")
-          print(f"has_insider={has_insider} force_debug={force}")
-
-          if not (has_insider or force):
-            print("Geen alert -> WhatsApp niet verstuurd.")
-            sys.exit(0)
-
-          # Binnenkomende kopjes (max 5)
-          heads = []
-          for s in signals:
-            if s.get("type")=="insider":
-              heads.append(s.get("raw_title") or s.get("ref",""))
-            if len(heads) == 5: break
-
-          # Top nieuws
-          top_news = ""
-          if news_items:
-            item = news_items[0]
-            top_news = item.get("headline") or item.get("title") or ""
-
-          lines = ["Insider Monitor alert"]
-          if heads:
-            lines.append("== Top insiders ==")
-            lines += [f"- {h}" for h in heads]
-          if top_news:
-            lines.append("")
-            lines.append("== Laatste nieuws ==")
-            lines.append(f"- {top_news}")
-
-          body = "\n".join(lines)
 
           sid = os.environ["TWILIO_ACCOUNT_SID"]
           tok = os.environ["TWILIO_AUTH_TOKEN"]
-          to  = os.environ["ALERT_TO_INSIDER"]
+          to = os.environ["ALERT_TO_INSIDER"]
 
-          msg = Client(sid, tok).messages.create(
+          client = Client(sid, tok)
+
+          body = "🚨 Insider Monitor testbericht: dit is een DEBUG push met nieuws!"
+
+          msg = client.messages.create(
               body=body,
               from_="whatsapp:+14155238886",
               to=f"whatsapp:{to}"
           )
+
           print("WhatsApp verzonden! SID:", msg.sid)
           PY
 
@@ -111,3 +75,4 @@ jobs:
           path: |
             data/reports/latest.txt
             data/reports/summary_*.txt
+          if-no-files-found: ignore
