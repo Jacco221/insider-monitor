@@ -1,4 +1,4 @@
-name: Manual Debug WhatsApp
+name: Manual Debug (WhatsApp)
 
 on:
   workflow_dispatch:
@@ -21,20 +21,22 @@ jobs:
       - name: Send WhatsApp (always)
         env:
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
-          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
           ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}
         run: |
           python - <<'PY'
           import os
           from twilio.rest import Client
-          sid = os.environ['TWILIO_ACCOUNT_SID'].strip()
-          tok = os.environ['TWILIO_AUTH_TOKEN'].strip()
-          to  = os.environ['ALERT_TO_INSIDER'].strip()
+
+          sid = os.environ.get('TWILIO_ACCOUNT_SID','').strip()
+          tok = os.environ.get('TWILIO_AUTH_TOKEN','').strip()
+          to  = os.environ.get('ALERT_TO_INSIDER','').strip()
+
           client = Client(sid, tok)
           msg = client.messages.create(
-            body="Manual DEBUG: workflow_dispatch werkt ✅",
-            from_="whatsapp:+14155238886",
-            to=f"whatsapp:{to}",
+              body="✅ Manual DEBUG: workflow_dispatch werkt en WhatsApp is aangesloten.",
+              from_="whatsapp:+14155238886",  # Twilio sandbox
+              to=f"whatsapp:{to}"
           )
           print("WhatsApp verzonden! SID:", msg.sid)
           PY
