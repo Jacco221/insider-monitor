@@ -1,0 +1,40 @@
+name: Manual Debug WhatsApp
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Twilio SDK
+        run: pip install --upgrade twilio
+
+      - name: Send WhatsApp (always)
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}
+        run: |
+          python - <<'PY'
+          import os
+          from twilio.rest import Client
+          sid = os.environ['TWILIO_ACCOUNT_SID'].strip()
+          tok = os.environ['TWILIO_AUTH_TOKEN'].strip()
+          to  = os.environ['ALERT_TO_INSIDER'].strip()
+          client = Client(sid, tok)
+          msg = client.messages.create(
+            body="Manual DEBUG: workflow_dispatch werkt ✅",
+            from_="whatsapp:+14155238886",
+            to=f"whatsapp:{to}",
+          )
+          print("WhatsApp verzonden! SID:", msg.sid)
+          PY
