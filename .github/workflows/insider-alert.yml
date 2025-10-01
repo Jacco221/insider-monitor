@@ -1,0 +1,93 @@
+name: Insider Alerts (WhatsApp)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installeer dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install twilio
+
+      - name: Toon repo layout (debug)
+        run: ls -R
+
+      - name: Draai insider pipeline (dummy ok)
+        run: |
+          set -e
+          python scripts/fetch_insiders.py || true
+          python scripts/score_signals.py   || true
+          python scripts/fetch_news.py      || true
+          python scripts/report_builder.py  || true
+          echo "== Laatste rapport =="
+          ls -lh data/reports || true
+          echo "== Voorbeeld latest.txt =="
+          tail -50 data/reports/latest.txt || true
+
+      - name: Stuur WhatsApp met topnieuws (altijd)
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
+          ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}
+        run: |
+          python - <<'PY'
+          import os, re, sys, pathlib
+          from twilio.rest import Client
+
+          base = pathlib.Path("data/reports")
+          latest = base / "latest.txt"
+          body = "Insider Monitor: geen rapport gevonden."
+          if latest.exists():
+              txt = latest.read_text(encoding="utf-8", errors="ignore")
+              # Pak de sectie "== Laatste nieuws ==" en neem 1-2 regels eronder
+              top = "Insider Monitor – top nieuws:\n"
+              m = re.search(r"^== Laatste nieuws ==\s*(.+)$", txt, flags=re.M|re.S)
+              if m:
+                  sect = m.group(1).strip()
+                  # Neem de eerste niet-lege regels (max 2)
+                  lines = [ln.strip(" -") for ln in sect.splitlines() if ln.strip()][:2]
+                  if lines:
+                      top += "• " + "\n• ".join(lines)
+                      body = top
+                  else:
+                      body = "Insider Monitor – geen nieuwsregels gevonden."
+              else:
+                  # Fallback: pak de eerste 200 chars van het rapport
+                  body = "Insider Monitor – samenvatting:\n" + txt[:200]
+          # Stuur via Twilio
+          sid = os.environ.get("TWILIO_ACCOUNT_SID","").strip()
+          tok = os.environ.get("TWILIO_AUTH_TOKEN","").strip()
+          to  = os.environ.get("ALERT_TO_INSIDER","").strip()
+          if not (sid and tok and to):
+              print("Twilio/TO secrets ontbreken.", file=sys.stderr)
+              sys.exit(1)
+          client = Client(sid, tok)
+          msg = client.messages.create(
+              body=body,
+              from_="whatsapp:+14155238886",
+              to=f"whatsapp:{to}",
+          )
+          print("WhatsApp verzonden! SID:", msg.sid)
+          PY
+
+      - name: Upload rapporten (optioneel)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            data/reports/latest.txt
+            data/reports/summary_*.txt
+          if-no-files-found: ignore
