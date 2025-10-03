@@ -38,22 +38,26 @@ jobs:
           echo "== latest.txt tail =="
           tail -50 data/reports/latest.txt || true
 
-      - name: Send WhatsApp with hottest news (never fail job)
       - name: Ensure latest.txt exists (copy newest or create fallback)
         run: |
           python - <<'PY'
           import pathlib
-          base=pathlib.Path("data/reports"); base.mkdir(parents=True, exist_ok=True)
-          latest=base/"latest.txt"
+          base = pathlib.Path("data/reports")
+          base.mkdir(parents=True, exist_ok=True)
+          latest = base / "latest.txt"
           if not latest.exists():
-              files=sorted(base.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
+              files = sorted(base.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
               if files:
                   latest.write_text(files[0].read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
                   print("Created latest.txt from:", files[0])
               else:
                   latest.write_text("== Laatste nieuws ==\nGeen headlines gevonden – fallback.\n", encoding="utf-8")
                   print("Created fallback latest.txt")
+          else:
+              print("latest.txt already exists")
           PY
+
+      - name: Send WhatsApp with hottest news (never fail job)
         env:
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
           TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
