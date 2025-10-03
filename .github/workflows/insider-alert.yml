@@ -70,12 +70,18 @@ jobs:
               shutil.copy2(seed, latest)
               print("[guard] Created latest.txt from seed")
 
-          if ok(latest):
+          if (latest.exists() and latest.stat().st_size>0):
               print("[guard] latest.txt ready:", latest)
           else:
               print("[guard] WARNING: no report or seed; creating minimal")
               latest.write_text("== Laatste nieuws ==\n- Geen headlines.\n", encoding="utf-8")
           PY
+
+      - name: Build real-time headlines via RSS (if seed/minimal)
+        run: |
+          python scripts/fetch_headlines_rss.py
+          echo "== Head latest.txt after RSS =="
+          head -40 data/reports/latest.txt || true
 
       - name: Diagnostics (files & head)
         if: always()
