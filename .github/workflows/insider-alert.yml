@@ -28,15 +28,15 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install twilio
 
-      - name: Run pipeline (non-blocking)
+      - name: Run pipeline (verbose logging)
         run: |
-          set -e
-          python scripts/fetch_insiders.py || echo "fetch_insiders: warning ($?)"
-          python scripts/score_signals.py   || echo "score_signals: warning ($?)"
-          python scripts/fetch_news.py      || echo "fetch_news: warning ($?)"
-          python scripts/report_builder.py  || echo "report_builder: warning ($?)"
-          echo "== latest.txt tail (pre-guard) =="
-          tail -50 data/reports/latest.txt || true
+          set +e
+          echo "== fetch_insiders.py ==";  python scripts/fetch_insiders.py  2>&1 | sed 's/^/[fetch_insiders] /'  || echo "fetch_insiders: warning ($?)"
+          echo "== score_signals.py ==";   python scripts/score_signals.py    2>&1 | sed 's/^/[score_signals] /'   || echo "score_signals: warning ($?)"
+          echo "== fetch_news.py ==";      python scripts/fetch_news.py       2>&1 | sed 's/^/[fetch_news] /'      || echo "fetch_news: warning ($?)"
+          echo "== report_builder.py ==";  python scripts/report_builder.py    2>&1 | sed 's/^/[report_builder] /'  || echo "report_builder: warning ($?)"
+          echo "== List reports after pipeline =="; ls -lah data/reports || true
+          echo "== latest.txt (first 60 lines) =="; sed -n '1,60p' data/reports/latest.txt || true
 
       - name: Ensure latest.txt exists (prefer newest, else seed)
         run: |
@@ -80,10 +80,8 @@ jobs:
       - name: Diagnostics (files & head)
         if: always()
         run: |
-          echo "== List reports (.txt) =="
-          ls -lah data/reports/*.txt || true
-          echo "== Head latest.txt =="
-          head -40 data/reports/latest.txt || true
+          echo "== List reports (.txt) =="; ls -lah data/reports/*.txt || true
+          echo "== Head latest.txt =="; head -40 data/reports/latest.txt || true
 
       - name: Send WhatsApp with hottest news (never fail job)
         env:
