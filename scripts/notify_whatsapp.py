@@ -10,14 +10,14 @@ def _find_latest_file():
     return None
 
 def _parse_top_news(txt: str) -> list[str]:
-    # 1) Probeer expliciet de sectie '== Laatste nieuws =='
+    # Probeer '== Laatste nieuws =='
     m = re.search(r"^==\s*Laatste nieuws\s*==\s*(.+?)(?:\n==|\\Z)", txt, flags=re.M|re.S)
     block = (m.group(1).strip() if m else txt)
 
-    # 2) verzamel headline-achtige regels
+    # Filter regels
     lines = [ln.strip(" •-\t") for ln in block.splitlines() if ln.strip() and not ln.strip().startswith("==")]
     if not lines:
-        # fallback: probeer een lijst onder 'News items:' (zoals in sommige rapporten)
+        # Probeer 'News items:' sectie
         m2 = re.search(r"^News items:\s*(.+?)(?:\n\n|\\Z)", txt, flags=re.M|re.S|re.I)
         if m2:
             lines = [ln.strip(" •-\t") for ln in m2.group(1).splitlines() if ln.strip()]
@@ -25,7 +25,6 @@ def _parse_top_news(txt: str) -> list[str]:
     if not lines:
         return []
 
-    # scoor regels op [0.87] / (0.87) / score=0.87 en bonus voor HOT
     scored = []
     for ln in lines:
         mm = re.search(r"(?:\[\s*([01]?\.\d+)\s*\]|\(\s*([01]?\.\d+)\s*\)|score\s*=\s*([01]?\.\d+))", ln, flags=re.I)
@@ -38,7 +37,6 @@ def _parse_top_news(txt: str) -> list[str]:
         scored.append((-(score), ln))
 
     scored.sort()
-    # pak 1–2 beste regels, strip leading bullets/scores
     out = []
     for _, ln in scored[:2]:
         ln = re.sub(r"^\s*[-•]\s*", "", ln)
@@ -51,14 +49,14 @@ def build_body() -> str:
     pick = latest if latest.exists() else _find_latest_file()
     if not pick or not pick.exists():
         return "Insider Monitor: nog geen rapport beschikbaar."
-
     txt = pick.read_text(encoding="utf-8", errors="ignore")
     bullets = _parse_top_news(txt)
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     if bullets:
         return f"Insider Monitor – top nieuws ({ts}):\n• " + "\n• ".join(bullets)
-    # laatste fallback: korte samenvatting
-    return "Insider Monitor – samenvatting:\n" + txt[:240].strip()
+    # Laatste fallback: korte samenvatting (en niet de woord 'fallback' tonen)
+    snippet = re.sub(r"\s+", " ", txt).strip()[:240]
+    return f"Insider Monitor – samenvatting ({ts}):\n{snippet}"
 
 def sanitize_to(raw: str) -> str:
     cleaned = raw.replace("\u00A0","").replace("\u202F","").replace("\u2007","").strip()
