@@ -1,25 +1,31 @@
 import os, re, sys, pathlib
+from datetime import datetime
 
-def mask(s: str) -> str:
-    if not s: return "∅"
-    return s[:3] + "…" + s[-2:] if len(s) > 5 else s
+BASE = pathlib.Path("data/reports")
 
-def sanitize_to(raw: str) -> str:
-    # Verwijder verborgen spaties (NBSP, NNBSP, NARROW NBSP, etc.) en gewone whitespace
-    cleaned = raw.replace("\u00A0","").replace("\u202F","").replace("\u2007","").strip()
-    # Houd alleen '+' en digits over
-    cleaned = "".join(ch for ch in cleaned if ch.isdigit() or ch == "+")
-    # Strip dubbele plussen etc.
-    if cleaned.count("+") > 1:
-        cleaned = "+" + cleaned.replace("+","")
-    return cleaned
+def _find_latest_file():
+    if BASE.exists():
+        files = sorted(BASE.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
+        return files[0] if files else None
+    return None
 
-def pick_top_news(txt: str) -> str:
+def _parse_top_news(txt: str) -> list[str]:
+    # 1) Probeer expliciet de sectie '== Laatste nieuws =='
     m = re.search(r"^==\s*Laatste nieuws\s*==\s*(.+?)(?:\n==|\\Z)", txt, flags=re.M|re.S)
     block = (m.group(1).strip() if m else txt)
+
+    # 2) verzamel headline-achtige regels
     lines = [ln.strip(" •-\t") for ln in block.splitlines() if ln.strip() and not ln.strip().startswith("==")]
     if not lines:
-        return "Insider Monitor – geen nieuwsregels gevonden."
+        # fallback: probeer een lijst onder 'News items:' (zoals in sommige rapporten)
+        m2 = re.search(r"^News items:\s*(.+?)(?:\n\n|\\Z)", txt, flags=re.M|re.S|re.I)
+        if m2:
+            lines = [ln.strip(" •-\t") for ln in m2.group(1).splitlines() if ln.strip()]
+
+    if not lines:
+        return []
+
+    # scoor regels op [0.87] / (0.87) / score=0.87 en bonus voor HOT
     scored = []
     for ln in lines:
         mm = re.search(r"(?:\[\s*([01]?\.\d+)\s*\]|\(\s*([01]?\.\d+)\s*\)|score\s*=\s*([01]?\.\d+))", ln, flags=re.I)
@@ -27,45 +33,52 @@ def pick_top_news(txt: str) -> str:
         if mm:
             for g in (mm.group(1), mm.group(2), mm.group(3)):
                 if g: score = float(g); break
-        if re.search(r"\bHOT\b", ln, flags=re.I): score += 0.1
+        if re.search(r"\bHOT\b", ln, flags=re.I):
+            score += 0.1
         scored.append((-(score), ln))
+
     scored.sort()
-    top = [ln for _, ln in scored[:2]]
-    # verwijder leading score/bullet noise
-    clean = []
-    for ln in top:
+    # pak 1–2 beste regels, strip leading bullets/scores
+    out = []
+    for _, ln in scored[:2]:
         ln = re.sub(r"^\s*[-•]\s*", "", ln)
         ln = re.sub(r"^\s*(\[\s*[01]?\.\d+\s*\]|\(\s*[01]?\.\d+\s*\)|score\s*=\s*[01]?\.\d+)\s*[:\-]?\s*", "", ln, flags=re.I)
-        clean.append(ln)
-    return "Insider Monitor – top nieuws:\n• " + "\n• ".join(clean)
+        out.append(ln)
+    return out
 
 def build_body() -> str:
-    latest = pathlib.Path("data/reports/latest.txt")
-    if not latest.exists():
+    latest = BASE / "latest.txt"
+    pick = latest if latest.exists() else _find_latest_file()
+    if not pick or not pick.exists():
         return "Insider Monitor: nog geen rapport beschikbaar."
-    txt = latest.read_text(encoding="utf-8", errors="ignore")
-    return pick_top_news(txt)
+
+    txt = pick.read_text(encoding="utf-8", errors="ignore")
+    bullets = _parse_top_news(txt)
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    if bullets:
+        return f"Insider Monitor – top nieuws ({ts}):\n• " + "\n• ".join(bullets)
+    # laatste fallback: korte samenvatting
+    return "Insider Monitor – samenvatting:\n" + txt[:240].strip()
+
+def sanitize_to(raw: str) -> str:
+    cleaned = raw.replace("\u00A0","").replace("\u202F","").replace("\u2007","").strip()
+    cleaned = "".join(ch for ch in cleaned if ch.isdigit() or ch == "+")
+    if cleaned.count("+") > 1:
+        cleaned = "+" + cleaned.replace("+","")
+    return cleaned
 
 def main() -> int:
     body = build_body()
-
-    raw_to = os.getenv("ALERT_TO_INSIDER","")
-    to = sanitize_to(raw_to)
-
-    # Debug (masked)
-    codepoints = [ord(c) for c in raw_to]
-    print(f"[notify] ALERT_TO_INSIDER raw (masked): {mask(raw_to)}")
-    print(f"[notify] raw len: {len(raw_to)} codepoints: {codepoints}")
-    print(f"[notify] sanitized (masked): {mask(to)}")
-
     sid = os.getenv("TWILIO_ACCOUNT_SID","").strip()
     tok = os.getenv("TWILIO_AUTH_TOKEN","").strip()
+    to_raw = os.getenv("ALERT_TO_INSIDER","")
+    to = sanitize_to(to_raw)
 
-    # Valideer E.164
+    import re
     if not re.fullmatch(r"\+\d{10,15}", to):
-        print("WAARSCHUWING: ALERT_TO_INSIDER ongeldig na sanitisatie; versturen overgeslagen.", file=sys.stderr)
+        print("WAARSCHUWING: ALERT_TO_INSIDER ongeldig; versturen overgeslagen.", file=sys.stderr)
         print("Body (zou verstuurd worden):\n", body)
-        return 0  # run mag nooit falen
+        return 0
 
     try:
         from twilio.rest import Client
