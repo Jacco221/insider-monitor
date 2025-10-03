@@ -1,50 +1,46 @@
 import os, re, sys, pathlib
-from datetime import datetime
+
+def mask(s: str) -> str:
+    if not s: return "∅"
+    return s[:3] + "…" + s[-2:] if len(s) > 5 else s
+
+def sanitize_to(raw: str) -> str:
+    # Verwijder verborgen spaties (NBSP, NNBSP, NARROW NBSP, etc.) en gewone whitespace
+    cleaned = raw.replace("\u00A0","").replace("\u202F","").replace("\u2007","").strip()
+    # Houd alleen '+' en digits over
+    cleaned = "".join(ch for ch in cleaned if ch.isdigit() or ch == "+")
+    # Strip dubbele plussen etc.
+    if cleaned.count("+") > 1:
+        cleaned = "+" + cleaned.replace("+","")
+    return cleaned
 
 def pick_top_news(txt: str) -> str:
-    """
-    Zoekt in latest.txt naar de beste headline:
-    - Neemt eerst de sectie '== Laatste nieuws ==' als die bestaat
-    - Herkent scores als [0.87], (0.87), score=0.87
-    - Kiest hoogste score; valt terug op eerste niet-lege headline
-    - Pakt max 2 regels
-    """
-    # 1) beperk tot sectie 'Laatste nieuws' als aanwezig
     m = re.search(r"^==\s*Laatste nieuws\s*==\s*(.+?)(?:\n==|\\Z)", txt, flags=re.M|re.S)
     block = (m.group(1).strip() if m else txt)
-
-    lines_raw = [ln.strip() for ln in block.splitlines()]
-    # filter lege/technische regels
-    lines = [ln.strip(" •-\t") for ln in lines_raw if ln.strip() and not ln.strip().startswith("==")]
-
+    lines = [ln.strip(" •-\t") for ln in block.splitlines() if ln.strip() and not ln.strip().startswith("==")]
     if not lines:
         return "Insider Monitor – geen nieuwsregels gevonden."
-
     scored = []
     for ln in lines:
-        # score in [0.87] of (0.87) of score=0.87
         mm = re.search(r"(?:\[\s*([01]?\.\d+)\s*\]|\(\s*([01]?\.\d+)\s*\)|score\s*=\s*([01]?\.\d+))", ln, flags=re.I)
-        score = float(next((g for g in (mm.group(1) if mm else None, mm.group(2) if mm else None, mm.group(3) if mm else None) if g), "0") or 0)
-        # prefer lines tagged HOT
-        hot_bonus = 0.1 if re.search(r"\bHOT\b", ln, flags=re.I) else 0.0
-        scored.append((-(score + hot_bonus), ln, score))
-
-    scored.sort()  # hoogste (score+bonus) eerst
-    top = scored[:2]
-
-    bullets = []
-    for _, ln, sc in top:
-        # kort opschonen van leading bullets/scores
-        ln_clean = re.sub(r"^\s*[-•]\s*", "", ln)
-        ln_clean = re.sub(r"^\s*(\[\s*[01]?\.\d+\s*\]|\(\s*[01]?\.\d+\s*\)|score\s*=\s*[01]?\.\d+)\s*[:\-]?\s*", "", ln_clean, flags=re.I)
-        bullets.append(ln_clean)
-
-    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    return "Insider Monitor – top nieuws (" + ts + "):\n• " + "\n• ".join(bullets)
+        score = 0.0
+        if mm:
+            for g in (mm.group(1), mm.group(2), mm.group(3)):
+                if g: score = float(g); break
+        if re.search(r"\bHOT\b", ln, flags=re.I): score += 0.1
+        scored.append((-(score), ln))
+    scored.sort()
+    top = [ln for _, ln in scored[:2]]
+    # verwijder leading score/bullet noise
+    clean = []
+    for ln in top:
+        ln = re.sub(r"^\s*[-•]\s*", "", ln)
+        ln = re.sub(r"^\s*(\[\s*[01]?\.\d+\s*\]|\(\s*[01]?\.\d+\s*\)|score\s*=\s*[01]?\.\d+)\s*[:\-]?\s*", "", ln, flags=re.I)
+        clean.append(ln)
+    return "Insider Monitor – top nieuws:\n• " + "\n• ".join(clean)
 
 def build_body() -> str:
-    base = pathlib.Path("data/reports")
-    latest = base / "latest.txt"
+    latest = pathlib.Path("data/reports/latest.txt")
     if not latest.exists():
         return "Insider Monitor: nog geen rapport beschikbaar."
     txt = latest.read_text(encoding="utf-8", errors="ignore")
@@ -53,22 +49,30 @@ def build_body() -> str:
 def main() -> int:
     body = build_body()
 
+    raw_to = os.getenv("ALERT_TO_INSIDER","")
+    to = sanitize_to(raw_to)
+
+    # Debug (masked)
+    codepoints = [ord(c) for c in raw_to]
+    print(f"[notify] ALERT_TO_INSIDER raw (masked): {mask(raw_to)}")
+    print(f"[notify] raw len: {len(raw_to)} codepoints: {codepoints}")
+    print(f"[notify] sanitized (masked): {mask(to)}")
+
     sid = os.getenv("TWILIO_ACCOUNT_SID","").strip()
     tok = os.getenv("TWILIO_AUTH_TOKEN","").strip()
-    to  = os.getenv("ALERT_TO_INSIDER","").strip()
 
-    # Validatie: E.164
+    # Valideer E.164
     if not re.fullmatch(r"\+\d{10,15}", to):
-        print("WAARSCHUWING: ALERT_TO_INSIDER ongeldig; versturen overgeslagen.", file=sys.stderr)
+        print("WAARSCHUWING: ALERT_TO_INSIDER ongeldig na sanitisatie; versturen overgeslagen.", file=sys.stderr)
         print("Body (zou verstuurd worden):\n", body)
-        return 0  # nooit job breken
+        return 0  # run mag nooit falen
 
     try:
         from twilio.rest import Client
         client = Client(sid, tok)
         msg = client.messages.create(
             body=body,
-            from_="whatsapp:+14155238886",  # Twilio WhatsApp sandbox sender
+            from_="whatsapp:+14155238886",
             to=f"whatsapp:{to}",
         )
         print("WhatsApp verzonden! SID:", msg.sid)
@@ -76,7 +80,7 @@ def main() -> int:
     except Exception as e:
         print("WAARSCHUWING: WhatsApp verzenden faalde:", repr(e), file=sys.stderr)
         print("Body (zou verstuurd worden):\n", body)
-        return 0  # nooit job breken
+        return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())
