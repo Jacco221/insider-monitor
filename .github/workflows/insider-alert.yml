@@ -2,10 +2,17 @@ name: Insider Alerts (WhatsApp)
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '*/30 * * * *'   # elke 30 minuten
+
+concurrency:
+  group: insider-alert
+  cancel-in-progress: true
 
 jobs:
   alert:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,59 +38,14 @@ jobs:
           echo "== latest.txt tail =="
           tail -50 data/reports/latest.txt || true
 
-      - name: Debug ALERT_TO_INSIDER
-        env:
-          ALERT_TO_INSIDER: ${{ secrets.ALERT_TO_INSIDER }}
-        run: |
-          python - <<'PY'
-          import os, re
-          to = os.getenv("ALERT_TO_INSIDER","")
-          safe = (to[:3] + "…" + to[-2:]) if to.startswith("+") and len(to)>=5 else "n/a"
-          print("Masked:", safe)
-          print("Len:", len(to))
-          print("Regex OK:", bool(re.fullmatch(r"\+\d{10,15}", to)))
-          print("Has space:", " " in to)
-          print("Codepoints:", [ord(c) for c in to])
-          PY
-
-      - name: Send WhatsApp (never fail job)
+      - name: Send WhatsApp with hottest news (never fail job)
         env:
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
           TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
           ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}
-        run: |
-          python - <<'PY'
-          import os, re, pathlib, sys
-          base = pathlib.Path("data/reports"); latest = base/"latest.txt"
-          body = "Insider Monitor: geen rapport gevonden."
-          if latest.exists():
-              txt = latest.read_text(encoding="utf-8", errors="ignore")
-              m = re.search(r"^==\s*Laatste nieuws\s*==\s*(.+?)(?:\n==|\\Z)", txt, flags=re.M|re.S)
-              sect = (m.group(1).strip() if m else txt)
-              lines = [ln.strip(" •-\t") for ln in sect.splitlines() if ln.strip()]
-              body = "Insider Monitor – top nieuws:\n• " + "\n• ".join(lines[:2]) if lines else "Insider Monitor – samenvatting:\n"+txt[:200]
-          try:
-              sid=os.getenv("TWILIO_ACCOUNT_SID","").strip()
-              tok=os.getenv("TWILIO_AUTH_TOKEN","").strip()
-              to =os.getenv("ALERT_TO_INSIDER","").strip()
-              if not re.fullmatch(r"\+\d{10,15}", to):
-                  print("WAARSCHUWING: ALERT_TO_INSIDER ongeldig. Body die verstuurd zou worden:\n", body, file=sys.stderr)
-                  sys.exit(0)
-              from twilio.rest import Client
-              client=Client(sid,tok)
-              msg=client.messages.create(
-                  body=body,
-                  from_="whatsapp:+14155238886",
-                  to=f"whatsapp:{to}",
-              )
-              print("WhatsApp verzonden! SID:", msg.sid)
-          except Exception as e:
-              print("WAARSCHUWING: WhatsApp verzenden faalde:", repr(e), file=sys.stderr)
-              print("Body (zou verstuurd worden):\n", body)
-              sys.exit(0)
-          PY
+        run: python scripts/notify_whatsapp.py
 
-      - name: Upload reports
+      - name: Upload reports (artifact)
         if: always()
         uses: actions/upload-artifact@v4
         with:
