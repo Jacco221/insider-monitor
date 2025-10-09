@@ -1,110 +1,44 @@
-name: Insider Alerts (WhatsApp)
-
+name: insider-alert
 on:
-  workflow_dispatch:
   schedule:
-    - cron: '*/30 * * * *'
-
-concurrency:
-  group: insider-alert
-  cancel-in-progress: true
+    - cron: "*/30 * * * *"   # elke 30 minuten
+  workflow_dispatch:
 
 jobs:
-  alert:
+  run:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python 3.11
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install deps (incl. twilio)
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install twilio
 
-      - name: Fetch SEC Form 4 (edge)
+      - name: Prepare folders
+        run: |
+          mkdir -p data/reports data/state
+
+      - name: Fetch SEC Form 4 (SEC-only)
         env:
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+          SEC_DEBUG: "1"
         run: |
-          python scripts/fetch_insiders_sec.py
-          echo "== sec_headlines (first 30) =="
-          sed -n '1,30p' data/reports/sec_headlines.txt || true
-          echo "== sec_headlines stats =="
-          wc -l data/reports/sec_headlines.txt || true
+          python3 scripts/fetch_insiders_sec.py
+          echo "---- sec_headlines.txt ----"
+          sed -n '1,60p' data/reports/sec_headlines.txt || true
 
-      - name: Run pipeline (verbose logging)
-        run: |
-          set +e
-          echo "== fetch_insiders.py ==";  python scripts/fetch_insiders.py  2>&1 | sed 's/^/[fetch_insiders] /'  || echo "fetch_insiders: warning ($?)"
-          echo "== score_signals.py ==";   python scripts/score_signals.py    2>&1 | sed 's/^/[score_signals] /'   || echo "score_signals: warning ($?)"
-          echo "== fetch_news.py ==";      python scripts/fetch_news.py       2>&1 | sed 's/^/[fetch_news] /'      || echo "fetch_news: warning ($?)"
-          echo "== report_builder.py ==";  python scripts/report_builder.py    2>&1 | sed 's/^/[report_builder] /'  || echo "report_builder: warning ($?)"
-          echo "== List reports after pipeline =="; ls -lah data/reports || true
-          echo "== latest.txt (first 40 pre-integrate) =="; sed -n '1,40p' data/reports/latest.txt || true
-
-      - name: Integrate SEC headlines into latest.txt (safe)
-        run: |
-          python - <<'PY'
-          import pathlib, re, sys
-          d = pathlib.Path("data/reports"); d.mkdir(parents=True, exist_ok=True)
-          latest = d/"latest.txt"; sec = d/"sec_headlines.txt"
-          if not latest.exists():
-              latest.write_text("== Laatste nieuws ==\n", encoding="utf-8")
-          base = latest.read_text(encoding="utf-8", errors="ignore")
-          sec_lines = []
-          if sec.exists() and sec.stat().st_size > 0:
-              for ln in sec.read_text(encoding="utf-8", errors="ignore").splitlines():
-                  ln = ln.strip()
-                  if ln: sec_lines.append(ln)
-          if not sec_lines:
-              print("[integrate] no SEC lines to add; latest.txt left unchanged")
-              print("[integrate] latest.txt head:"); print("\n".join(base.splitlines()[:20]))
-              sys.exit(0)
-          # plak bovenaan sectie 'Laatste nieuws', dedupe
-          m = re.search(r"^==\\s*Laatste nieuws\\s*==\\s*(.*)$", base, flags=re.M|re.S)
-          body = m.group(1) if m else ""
-          existing = set([x.strip() for x in body.splitlines() if x.strip()])
-          prepend = [ln for ln in sec_lines if ln not in existing][:8]
-          if not prepend:
-              print("[integrate] SEC lines already present; nothing to add")
-              sys.exit(0)
-          new_news = "== Laatste nieuws ==\n" + "\n".join(prepend) + "\n" + body
-          head = base[:m.start()] if m else ""
-          latest.write_text(head + new_news, encoding="utf-8")
-          print(f"[integrate] added {len(prepend)} SEC lines on top")
-          PY
-          echo "== latest.txt (first 60 after integrate) =="
-          sed -n '1,60p' data/reports/latest.txt || true
-
-      - name: Build real-time headlines via RSS (if seed/minimal)
-        run: |
-          python scripts/fetch_headlines_rss.py
-          echo "== Head latest.txt after RSS =="
-          head -40 data/reports/latest.txt || true
-
-      - name: Diagnostics (files & head)
-        if: always()
-        run: |
-          echo "== List reports (.txt) =="; ls -lah data/reports/*.txt || true
-          echo "== Head latest.txt =="; head -40 data/reports/latest.txt || true
-
-      - name: Send WhatsApp with hottest news (never fail job)
+      - name: Compose & Send (wrapper)
         env:
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
           TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_WHATSAPP_FROM: ${{ secrets.TWILIO_WHATSAPP_FROM || 'whatsapp:+14155238886' }}
           ALERT_TO_INSIDER:   ${{ secrets.ALERT_TO_INSIDER }}
-        run: python scripts/notify_whatsapp.py
-
-      - name: Upload reports (artifact)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: reports
-          path: data/reports/*.txt
-          if-no-files-found: warn
+        run: |
+          python3 scripts/send_update.py

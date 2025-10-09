@@ -1,7 +1,8 @@
-import os, re, sys, pathlib
+import os, re, sys, subprocess, pathlib
 from datetime import datetime
 
 BASE = pathlib.Path("data/reports")
+BASE.mkdir(parents=True, exist_ok=True)
 
 HOT_WORDS = {"plunge","tumbles","crash","collapse","halts","investigation","probe","fraud",
              "lawsuit","downgrade","withdraws guidance","cuts guidance","misses","short seller",
@@ -13,10 +14,16 @@ HOT_WORDS = {"plunge","tumbles","crash","collapse","halts","investigation","prob
 def _norm(s:str) -> str:
     return s.replace("\r\n","\n").replace("\r","\n")
 
+def _looks_minimal(txt: str) -> bool:
+    low = txt.strip().lower()
+    if not low: return True
+    has_header = "== laatste nieuws ==" in low
+    bullets = len(re.findall(r"(?m)^\s*[-•]\s+\S+", txt))
+    return has_header and bullets == 0
+
 def _parse_top_news(txt: str):
     txt = _norm(txt)
     lines = [ln.rstrip() for ln in txt.split("\n")]
-    # Vind sectie
     section, start = [], None
     for i, ln in enumerate(lines):
         if "Laatste nieuws" in ln:
@@ -41,44 +48,68 @@ def _hot_tag(line:str, score_hint:float=0.0)->str:
     low = line.lower()
     return "🔥HOT🔥 " if any(w in low for w in HOT_WORDS) else ""
 
+def _ensure_rss_if_needed(latest_path: pathlib.Path) -> str:
+    txt = latest_path.read_text(encoding="utf-8", errors="ignore") if latest_path.exists() else ""
+    if _looks_minimal(txt):
+        try:
+            subprocess.run([sys.executable, "scripts/fetch_headlines_rss.py"], check=False)
+            txt = latest_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            pass
+    return txt
+
 def build_body():
     latest = BASE/"latest.txt"
-    if not latest.exists() or latest.stat().st_size == 0:
+    txt = _ensure_rss_if_needed(latest)
+    if not txt:
         return "[SEED] Insider Monitor – geen rapport gevonden."
-    txt = latest.read_text(encoding="utf-8", errors="ignore")
     src = _detect_source(txt)
     items = _parse_top_news(txt)
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     if items:
-        # maak maximaal 2 regels, HOT markering eenvoudig
         out = []
         for ln in items[:2]:
             tag = _hot_tag(ln)
             out.append(f"{tag}{ln}")
         return f"{src} Insider Monitor – top nieuws ({ts}):\n• " + "\n• ".join(out)
-    # fallback: altijd tekst sturen, nooit leeg
+    # fallback: altijd tekst sturen, nooit alleen header
     snippet = re.sub(r"\s+"," ", _norm(txt)).strip()[:220]
-    if not snippet:
-        snippet = "Geen nieuwe tradable headlines. (SEC- of RSS-sectie leverde niets op in deze run.)"
+    if (not snippet) or (snippet.lower().strip() in {"== laatste nieuws ==", "laatste nieuws"}):
+        snippet = "Geen nieuwe tradable headlines; aangevuld met RSS of bronnen waren leeg."
     return f"{src} Insider Monitor – update ({ts}): {snippet}"
 
-def sanitize_to(raw:str)->str:
-    raw = raw.replace("\u00A0","").replace("\u202F","").replace("\u2007","")
-    cleaned = "".join(ch for ch in raw if ch.isdigit() or ch=="+").strip()
-    if cleaned.count("+")>1: cleaned = "+"+cleaned.replace("+","")
-    return cleaned
+def _normalize_to(raw: str) -> str:
+    raw = (raw or "").strip()
+    if not raw: return ""
+    # sta zowel +316… als whatsapp:+316… toe
+    if raw.startswith("whatsapp:"):
+        return raw
+    # zet 0031… om naar +31…
+    if raw.startswith("003"):
+        raw = "+" + raw[2:]
+    if raw.startswith("+"):
+        return f"whatsapp:{raw}"
+    # als iemand alleen cijfers geeft, probeer er + voor te zetten (niet ideaal, maar handig)
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if digits:
+        return f"whatsapp:+{digits}"
+    return ""
 
 def main()->int:
     body = build_body()
+    print("[notify] Body preview:\n", body)
+
     sid = os.getenv("TWILIO_ACCOUNT_SID","").strip()
     tok = os.getenv("TWILIO_AUTH_TOKEN","").strip()
-    to  = sanitize_to(os.getenv("ALERT_TO_INSIDER",""))
-    print("[notify] Body preview:\n", body)
-    if not re.fullmatch(r"\+\d{10,15}", to):
-        print("To ongeldig; verzenden overgeslagen."); return 0
+    to_env = os.getenv("ALERT_TO_INSIDER") or os.getenv("WHATSAPP_TO") or os.getenv("ALERT_TO") or ""
+    to = _normalize_to(to_env)
+    if not re.fullmatch(r"whatsapp:\+\d{7,15}", to or ""):
+        print(f"To ongeldig; verzenden overgeslagen. ({to_env!r})"); return 0
+
+    from_num = os.getenv("TWILIO_WHATSAPP_FROM","whatsapp:+14155238886")
     try:
         from twilio.rest import Client
-        msg = Client(sid,tok).messages.create(body=body, from_="whatsapp:+14155238886", to=f"whatsapp:{to}")
+        msg = Client(sid,tok).messages.create(body=body, from_=from_num, to=to)
         print("WhatsApp verzonden! SID:", msg.sid); return 0
     except Exception as e:
         print("Fout bij versturen:", e); return 0
