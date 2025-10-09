@@ -3,7 +3,7 @@ name: Insider Alerts (WhatsApp)
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/30 * * * *'   # elke 30 minuten
+    - cron: '*/30 * * * *'
 
 concurrency:
   group: insider-alert
@@ -28,14 +28,15 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install twilio
 
-      # ===== NEW: SEC Form-4 fetch =====
       - name: Fetch SEC Form 4 (edge)
         env:
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
         run: |
           python scripts/fetch_insiders_sec.py
-          echo "== sec_headlines =="
-          sed -n '1,40p' data/reports/sec_headlines.txt || true
+          echo "== sec_headlines (first 30) =="
+          sed -n '1,30p' data/reports/sec_headlines.txt || true
+          echo "== sec_headlines stats =="
+          wc -l data/reports/sec_headlines.txt || true
 
       - name: Run pipeline (verbose logging)
         run: |
@@ -45,49 +46,45 @@ jobs:
           echo "== fetch_news.py ==";      python scripts/fetch_news.py       2>&1 | sed 's/^/[fetch_news] /'      || echo "fetch_news: warning ($?)"
           echo "== report_builder.py ==";  python scripts/report_builder.py    2>&1 | sed 's/^/[report_builder] /'  || echo "report_builder: warning ($?)"
           echo "== List reports after pipeline =="; ls -lah data/reports || true
-          echo "== latest.txt (first 40) =="; sed -n '1,40p' data/reports/latest.txt || true
+          echo "== latest.txt (first 40 pre-integrate) =="; sed -n '1,40p' data/reports/latest.txt || true
 
-      # Plaats SEC-headlines bovenaan 'Laatste nieuws' (dedupe)
-      - name: Integrate SEC headlines into latest.txt
+      - name: Integrate SEC headlines into latest.txt (safe)
         run: |
           python - <<'PY'
-          import pathlib, re
-          d = pathlib.Path("data/reports")
-          latest = d/"latest.txt"
-          sec = d/"sec_headlines.txt"
-          d.mkdir(parents=True, exist_ok=True)
+          import pathlib, re, sys
+          d = pathlib.Path("data/reports"); d.mkdir(parents=True, exist_ok=True)
+          latest = d/"latest.txt"; sec = d/"sec_headlines.txt"
           if not latest.exists():
               latest.write_text("== Laatste nieuws ==\n", encoding="utf-8")
           base = latest.read_text(encoding="utf-8", errors="ignore")
           sec_lines = []
-          if sec.exists():
+          if sec.exists() and sec.stat().st_size > 0:
               for ln in sec.read_text(encoding="utf-8", errors="ignore").splitlines():
-                  if ln.strip(): sec_lines.append(ln.strip())
-          # Pak bestaande news-sectie
+                  ln = ln.strip()
+                  if ln: sec_lines.append(ln)
+          if not sec_lines:
+              print("[integrate] no SEC lines to add; latest.txt left unchanged")
+              print("[integrate] latest.txt head:"); print("\n".join(base.splitlines()[:20]))
+              sys.exit(0)
+          # plak bovenaan sectie 'Laatste nieuws', dedupe
           m = re.search(r"^==\\s*Laatste nieuws\\s*==\\s*(.*)$", base, flags=re.M|re.S)
           body = m.group(1) if m else ""
           existing = set([x.strip() for x in body.splitlines() if x.strip()])
-          # prepend nieuwe SEC regels die nog niet bestaan
-          prepend = [ln for ln in sec_lines if ln not in existing][:6]
-          new_news = "== Laatste nieuws ==\n"
-          if prepend:
-              new_news += "\\n".join(prepend) + "\\n"
-          new_news += body
-          # vervang of voeg sectie toe
-          if m:
-              head = base[:m.start()]
-              latest.write_text(head + new_news, encoding="utf-8")
-          else:
-              latest.write_text(new_news + "\\n" + base, encoding="utf-8")
-          print("[integrate] added", len(prepend), "SEC lines on top")
+          prepend = [ln for ln in sec_lines if ln not in existing][:8]
+          if not prepend:
+              print("[integrate] SEC lines already present; nothing to add")
+              sys.exit(0)
+          new_news = "== Laatste nieuws ==\n" + "\n".join(prepend) + "\n" + body
+          head = base[:m.start()] if m else ""
+          latest.write_text(head + new_news, encoding="utf-8")
+          print(f"[integrate] added {len(prepend)} SEC lines on top")
           PY
-          echo "== latest.txt (first 60 after SEC integrate) =="
+          echo "== latest.txt (first 60 after integrate) =="
           sed -n '1,60p' data/reports/latest.txt || true
 
-      # Guard blijft (maakt latest, seed of minimal indien nodig)
       - name: Build real-time headlines via RSS (if seed/minimal)
         run: |
-          python scripts/fetch_headlines_rss.py || true
+          python scripts/fetch_headlines_rss.py
           echo "== Head latest.txt after RSS =="
           head -40 data/reports/latest.txt || true
 
