@@ -1,3 +1,4 @@
+# (verkorte header)
 import os, sys, re, json, html, pathlib, datetime
 from urllib.request import Request, urlopen
 from urllib.parse import urljoin
@@ -120,7 +121,6 @@ def append_seen(keys):
         for k in keys:
             f.write(json.dumps({"key": k, "ts": datetime.datetime.utcnow().isoformat()+"Z"})+"\n")
 
-# -------- Heuristieken (rol-bewust) --------
 def summarize_sides(txs):
     tot_A = sum(t["shares"]*t["price"] for t in txs if t.get("ad")=="A" or t.get("code")=="P")
     tot_S = sum(t["shares"]*t["price"] for t in txs if t.get("code")=="S" or t.get("ad")=="D")
@@ -132,88 +132,71 @@ def summarize_sides(txs):
 def role_bucket(detail):
     title = (detail.get("officer_title") or "").lower()
     if detail.get("is_officer") or detail.get("is_director"):
-        # CEO/CFO/President/Chair → top
-        if any(k in title for k in ["chief executive", "ceo", "chief financial", "cfo", "president", "chair", "chairman"]):
+        if any(k in title for k in ["chief executive","ceo","chief financial","cfo","president","chair","chairman"]):
             return "top"
         return "officer_director"
     return "other"
 
-def should_include(detail):
+def should_include(detail, DEBUG=False):
     txs = detail.get("txs",[])
     if not txs: return (False, None, None)
     bucket = role_bucket(detail)
     tot_A, tot_S, tot_M, tot_F, biggest = summarize_sides(txs)
 
-    # Drempels per rol
+    # TEST-drempels: officers/directors versoepeld
     if bucket in ("top", "officer_director"):
-        buy_thresh  = 50_000
-        sell_thresh = 250_000
+        buy_thresh  = 25_000
+        sell_thresh = 150_000
     else:
         buy_thresh  = 250_000
         sell_thresh = 500_000
 
-    # BUY
     if tot_A >= buy_thresh:
         return (True, "BUY", biggest)
-
-    # SELL (filter administratief M/F)
-    net_sell_like = tot_S
-    if net_sell_like >= sell_thresh and net_sell_like > (tot_M + tot_F) * 1.2:
+    if tot_S >= sell_thresh and tot_S > (tot_M + tot_F) * 1.2:
         return (True, "SELL", biggest)
 
+    if DEBUG:
+        print("[debug] filtered by thresholds", dict(bucket=bucket, A=round(tot_A,2), S=round(tot_S,2), M=round(tot_M,2), F=round(tot_F,2)))
     return (False, None, None)
 
 def is_hot(side, detail, biggest):
     txs = detail.get("txs",[])
     bucket = role_bucket(detail)
     tot_A, tot_S, tot_M, tot_F, _ = summarize_sides(txs)
-
     if side == "BUY":
-        if bucket == "top":
-            return (tot_A >= 100_000) or any(t.get("code")=="P" for t in txs)
-        if bucket == "officer_director":
-            return (tot_A >= 150_000) or any(t.get("code")=="P" for t in txs)
+        if bucket == "top": return (tot_A >= 100_000) or any(t.get("code")=="P" for t in txs)
+        if bucket == "officer_director": return (tot_A >= 150_000) or any(t.get("code")=="P" for t in txs)
         return (tot_A >= 1_000_000) or any(t.get("code")=="P" for t in txs)
-
     if side == "SELL":
-        if bucket == "top":
-            return (tot_S >= 750_000) and (tot_S > (tot_M + tot_F) * 1.5)
-        if bucket == "officer_director":
-            return (tot_S >= 1_000_000) and (tot_S > (tot_M + tot_F) * 1.5)
+        if bucket == "top": return (tot_S >= 750_000) and (tot_S > (tot_M + tot_F) * 1.5)
+        if bucket == "officer_director": return (tot_S >= 1_000_000) and (tot_S > (tot_M + tot_F) * 1.5)
         return (tot_S >= 2_000_000) and (tot_S > (tot_M + tot_F) * 2.0)
-
     return False
 
-def build_headline(detail, updated_iso, fallback_name, fallback_tkr):
+def build_headline(detail, updated_iso, fallback_name, fallback_tkr, DEBUG=False):
     tkr   = (detail.get("ticker") or fallback_tkr or "").upper()
     issuer= detail.get("issuer") or fallback_name or ""
     owner = detail.get("owner") or "Insider"
-    ok, side, biggest = should_include(detail)
+    ok, side, biggest = should_include(detail, DEBUG)
     if not ok: return None
     base = (tkr or issuer or "").upper()
     if not base: return None
-
     when = updated_iso.replace("T"," ").replace("Z"," UTC") if updated_iso else "time: n/a"
     tag = "🔥HOT🔥 " if is_hot(side, detail, biggest) else ""
-    sh = biggest.get("shares",0.0); pr = biggest.get("price",0.0); code = biggest.get("code",""); ad = biggest.get("ad","")
+    sh = (biggest or {}).get("shares",0.0); pr = (biggest or {}).get("price",0.0); code = (biggest or {}).get("code",""); ad = (biggest or {}).get("ad","")
     notional = sh*pr if (sh and pr) else 0.0
     if sh and pr:
         return f"- [SEC] {tag}{base} – {owner} {side} {int(sh):,} @ ${pr:.2f} (~{human_amount(notional)}) [code={code}/{ad}] ({when})".replace(",", " ")
     else:
         return f"- [SEC] {tag}{base} – {owner} {side} [code={code}/{ad}] ({when})"
 
-def normalize_from_title(title: str) -> str | None:
-    m = re.search(r"Form\s*4\s*[-:]\s*(.+)", title, flags=re.I)
-    if m: return m.group(1).split("(")[0].strip()
-    m = re.search(r"^\s*4\s*[-:]\s*(.+)", title)
-    if m: return m.group(1).split("(")[0].strip()
-    return None
-
 def load_title_owner(title: str):
     m_owner = re.search(r"4\s*[-:]\s*([A-Za-z0-9 .,'&-]+)\s*\((?:Reporting|Filer)\)", title, flags=re.I)
     return m_owner.group(1).strip() if m_owner else None
 
 def main():
+    DEBUG = bool(os.getenv("SEC_DEBUG"))
     atom = fetch(ATOM_URL)
     entries = parse_atom(atom)
     f4 = [e for e in entries if e.get("form","").upper()=="4" or re.search(r"\bForm\s*4\b", e["title"], re.I)]
@@ -229,31 +212,39 @@ def main():
         key = accession or (link + "|" + updated)
         if key in seen:
             dedup_skips += 1
+            if DEBUG: print("[debug] skip dedup", key)
             continue
-
         xml = ""
         if xml_url:
             try: xml = fetch(xml_url, timeout=15)
             except Exception: xml = ""
-
         detail = parse_form4_xml(xml) if xml else {"ticker":"", "issuer":"", "owner":"", "txs":[], "is_officer":False, "is_director":False, "officer_title":""}
         fallback_name = page_company or normalize_from_title(e.get("title",""))
         fallback_tkr  = page_ticker
-
-        # Indien owner in titel staat, gebruik dat als hint
         owner_hint = load_title_owner(e.get("title",""))
         if owner_hint and not detail.get("owner"):
             detail["owner"] = owner_hint
 
-        line = build_headline(detail, updated, fallback_name, fallback_tkr)
+        line = build_headline(detail, updated, fallback_name, fallback_tkr, DEBUG)
         if line:
             lines.append(line); new_keys.append(key)
         else:
             non_tradable_skips += 1
+            if DEBUG:
+                txs = detail.get('txs',[])
+                if not txs:
+                    print("[debug] skip no-tx", key, fallback_name, fallback_tkr)
+                else:
+                    tot_A = sum(t.get('shares',0)*t.get('price',0) for t in txs if t.get('ad')=='A' or t.get('code')=='P')
+                    tot_S = sum(t.get('shares',0)*t.get('price',0) for t in txs if t.get('code')=='S' or t.get('ad')=='D')
+                    tot_M = sum(t.get('shares',0)*t.get('price',0) for t in txs if t.get('code')=='M')
+                    tot_F = sum(t.get('shares',0)*t.get('price',0) for t in txs if t.get('code')=='F')
+                    print("[debug] skip by thresholds", key, fallback_name, fallback_tkr, "A=", round(tot_A,2), "S=", round(tot_S,2), "M=", round(tot_M,2), "F=", round(tot_F,2))
 
     out = REPORTS / "sec_headlines.txt"
     out.write_text("\n".join(lines)+"\n", encoding="utf-8")
-    append_seen(new_keys)
+    with SEEN_PATH.open("a", encoding="utf-8") as f:
+        for k in new_keys: f.write(json.dumps({"key": k, "ts": datetime.datetime.utcnow().isoformat()+"Z"})+"\n")
     print(f"[sec] wrote: {out} ({len(lines)} lines); new_seen: {len(new_keys)}; dedup_skips: {dedup_skips}; filtered: {non_tradable_skips}")
     return 0
 
