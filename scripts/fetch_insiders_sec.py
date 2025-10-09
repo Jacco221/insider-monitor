@@ -114,6 +114,11 @@ def build_headline(detail: dict, updated_iso: str):
             return f"- [SEC] {tag_hot}{left} – {who} {side} [code={code}/{ad}] ({when})"
     else:
         # fallback: geen txs gevonden in XML
+        # fallback: als ticker ontbreekt, probeer naam uit titel
+        if not base or base=="UNKNOWN":
+            m=re.search(r"Form\s*4\s*[-:]\s*(.+)", e.get("title",""), flags=re.I)
+            if m:
+                base=m.group(1).split("(")[0].strip().upper()
         base = (tkr or issuer or "Unknown").upper()
         when = updated_iso.replace("T"," ").replace("Z"," UTC") if updated_iso else "time: n/a"
         return f"- [SEC] {base} – Form 4 filed ({when})"
