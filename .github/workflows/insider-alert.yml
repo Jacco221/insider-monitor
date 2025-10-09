@@ -28,6 +28,15 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install twilio
 
+      # ===== NEW: SEC Form-4 fetch =====
+      - name: Fetch SEC Form 4 (edge)
+        env:
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+        run: |
+          python scripts/fetch_insiders_sec.py
+          echo "== sec_headlines =="
+          sed -n '1,40p' data/reports/sec_headlines.txt || true
+
       - name: Run pipeline (verbose logging)
         run: |
           set +e
@@ -36,50 +45,49 @@ jobs:
           echo "== fetch_news.py ==";      python scripts/fetch_news.py       2>&1 | sed 's/^/[fetch_news] /'      || echo "fetch_news: warning ($?)"
           echo "== report_builder.py ==";  python scripts/report_builder.py    2>&1 | sed 's/^/[report_builder] /'  || echo "report_builder: warning ($?)"
           echo "== List reports after pipeline =="; ls -lah data/reports || true
-          echo "== latest.txt (first 60 lines) =="; sed -n '1,60p' data/reports/latest.txt || true
+          echo "== latest.txt (first 40) =="; sed -n '1,40p' data/reports/latest.txt || true
 
-      - name: Ensure latest.txt exists (prefer newest, else seed)
+      # Plaats SEC-headlines bovenaan 'Laatste nieuws' (dedupe)
+      - name: Integrate SEC headlines into latest.txt
         run: |
           python - <<'PY'
-          import pathlib, subprocess, sys, time, shutil
-          base = pathlib.Path("data/reports"); base.mkdir(parents=True, exist_ok=True)
-          latest = base / "latest.txt"
-          seed   = base / "seed_latest.txt"
-
-          def ok(p): return p.exists() and p.stat().st_size > 0
-          def newest_txt():
-              files = sorted(base.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
-              files = [f for f in files if f.name != "latest.txt"]
-              return files[0] if files else None
-
-          if not ok(latest):
-              try:
-                  print("[guard] latest ontbreekt/leeg → report_builder.py opnieuw…")
-                  subprocess.run([sys.executable, "scripts/report_builder.py"], check=False)
-                  time.sleep(1)
-              except Exception as e:
-                  print("[guard] tweede poging report_builder exception:", repr(e))
-
-          if not ok(latest):
-              src = newest_txt()
-              if src:
-                  latest.write_text(src.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
-                  print("[guard] Created latest.txt from:", src)
-
-          if not ok(latest) and seed.exists():
-              shutil.copy2(seed, latest)
-              print("[guard] Created latest.txt from seed")
-
-          if (latest.exists() and latest.stat().st_size>0):
-              print("[guard] latest.txt ready:", latest)
+          import pathlib, re
+          d = pathlib.Path("data/reports")
+          latest = d/"latest.txt"
+          sec = d/"sec_headlines.txt"
+          d.mkdir(parents=True, exist_ok=True)
+          if not latest.exists():
+              latest.write_text("== Laatste nieuws ==\n", encoding="utf-8")
+          base = latest.read_text(encoding="utf-8", errors="ignore")
+          sec_lines = []
+          if sec.exists():
+              for ln in sec.read_text(encoding="utf-8", errors="ignore").splitlines():
+                  if ln.strip(): sec_lines.append(ln.strip())
+          # Pak bestaande news-sectie
+          m = re.search(r"^==\\s*Laatste nieuws\\s*==\\s*(.*)$", base, flags=re.M|re.S)
+          body = m.group(1) if m else ""
+          existing = set([x.strip() for x in body.splitlines() if x.strip()])
+          # prepend nieuwe SEC regels die nog niet bestaan
+          prepend = [ln for ln in sec_lines if ln not in existing][:6]
+          new_news = "== Laatste nieuws ==\n"
+          if prepend:
+              new_news += "\\n".join(prepend) + "\\n"
+          new_news += body
+          # vervang of voeg sectie toe
+          if m:
+              head = base[:m.start()]
+              latest.write_text(head + new_news, encoding="utf-8")
           else:
-              print("[guard] WARNING: no report or seed; creating minimal")
-              latest.write_text("== Laatste nieuws ==\n- Geen headlines.\n", encoding="utf-8")
+              latest.write_text(new_news + "\\n" + base, encoding="utf-8")
+          print("[integrate] added", len(prepend), "SEC lines on top")
           PY
+          echo "== latest.txt (first 60 after SEC integrate) =="
+          sed -n '1,60p' data/reports/latest.txt || true
 
+      # Guard blijft (maakt latest, seed of minimal indien nodig)
       - name: Build real-time headlines via RSS (if seed/minimal)
         run: |
-          python scripts/fetch_headlines_rss.py
+          python scripts/fetch_headlines_rss.py || true
           echo "== Head latest.txt after RSS =="
           head -40 data/reports/latest.txt || true
 
