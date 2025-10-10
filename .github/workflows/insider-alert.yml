@@ -27,7 +27,12 @@ jobs:
         run: python3 scripts/fetch_insiders_sec.py
 
       - name: Rank SEC events
-        run: python3 scripts/prioritize_sec.py
+        run: |
+          if [ -f scripts/prioritize_sec.py ]; then
+            python3 scripts/prioritize_sec.py
+          else
+            echo "[rank] missing prioritize_sec.py; using raw SEC headlines"
+          fi
 
       - name: Compose latest from SEC first
         run: python3 scripts/compose_latest_sec_first.py
