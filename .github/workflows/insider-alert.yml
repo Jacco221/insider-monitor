@@ -34,7 +34,7 @@ jobs:
         run: python3 scripts/fetch_rns_mt.py
 
       - name: Fetch Euronext Managers' Transactions
-        run: python3 scripts/fetch_euronext_mt.py
+        run: python3 scripts/fetch_euronext_mt_html.py
 
       - name: Rank SEC events
         run: python3 scripts/prioritize_sec.py
