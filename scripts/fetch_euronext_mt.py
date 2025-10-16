@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 # Euronext corporate announcements (Managers’ Transactions) → data/reports/eu_events.jsonl (append)
-import os, re, json, pathlib
+import os, re, json, pathlib, sys
 from urllib.request import urlopen, Request
 from html import unescape
 
 OUT = pathlib.Path("data/reports/eu_events.jsonl"); OUT.parent.mkdir(parents=True, exist_ok=True)
 UA  = os.getenv("EURONEXT_USER_AGENT", "InsiderMonitor/1.0 (contact: you@example.com)")
 
-# Vervang door markt-/ticker-specifieke RSS zodra bekend; dit is een brede feed als voorbeeld.
+# Brede feed als voorbeeld; voor productie kun je specifieke markt-/ticker-feeds configureren.
 FEEDS = [
     "https://live.euronext.com/en/rss-feed",
 ]
 
-KEYS = re.compile(r"(?i)\b(manager|leidinggevend|pdmr).*?(transact|transaction|deal|meld)", re.S)
-BAD  = re.compile(r"(?i)\b(fund|obligatie|bond|note|certificate|structured)\b")
+# Ruime set aan sleutelwoorden (NL/EN/FR varianten voorkomen we hier; dit is basaal)
+KEEP_RX = re.compile(r"(?i)\b(managers?'?\s*transactions?|leidinggevend|bestuurder|pdmr|insider)\b")
+DROP_RX = re.compile(r"(?i)\b(fund|fonds|obligatie|bond|certificate|structured|note|warrant|etf)\b")
 
-def fetch(url, timeout=15):
+def fetch(url, timeout=20):
     req = Request(url, headers={"User-Agent": UA})
     with urlopen(req, timeout=timeout) as r:
         return r.read().decode("utf-8", "ignore")
@@ -24,7 +25,10 @@ def parse_rss(xml):
     items = re.findall(r"<item>(.+?)</item>", xml, flags=re.S|re.I)
     out=[]
     for it in items:
-        title = unescape(re.sub(r"<.*?>","", re.search(r"<title>(.*?)</title>", it, flags=re.S|re.I).group(1))).strip()
+        try:
+            title = unescape(re.sub(r"<.*?>","", re.search(r"<title>(.*?)</title>", it, flags=re.S|re.I).group(1))).strip()
+        except Exception:
+            continue
         linkm = re.search(r"<link>(.*?)</link>", it, flags=re.S|re.I)
         link  = unescape(linkm.group(1)).strip() if linkm else ""
         pubm  = re.search(r"<pubDate>(.*?)</pubDate>", it, flags=re.S|re.I)
@@ -33,10 +37,13 @@ def parse_rss(xml):
     return out
 
 def normalize(title, link, when):
-    if BAD.search(title) or not KEYS.search(title):
-        return None
-    issuer = unescape(title.split(" - ")[0]).strip()
-    return {
+    t = title.strip()
+    if not KEEP_RX.search(t):
+        return None, "no-keyword"
+    if DROP_RX.search(t):
+        return None, "drop-ruis"
+    issuer = unescape(t.split(" - ")[0]).strip()
+    ev = {
         "source":"Euronext",
         "xml_url": link,
         "ticker": issuer.upper(),
@@ -46,21 +53,38 @@ def normalize(title, link, when):
         "txs": [],
         "when": when
     }
+    return ev, None
 
 def main():
+    total=kept=0
+    dropped={"no-keyword":0, "drop-ruis":0}
+    sample_seen=[]
     evts=[]
     for u in FEEDS:
         try:
             xml = fetch(u)
-            for title, link, when in parse_rss(xml):
-                ev = normalize(title, link, when)
-                if ev: evts.append(ev)
-        except Exception:
+            items = parse_rss(xml)
+            total += len(items)
+            for (title, link, when) in items:
+                if len(sample_seen)<5: sample_seen.append(title.strip())
+                ev, reason = normalize(title, link, when)
+                if ev:
+                    kept += 1
+                    evts.append(ev)
+                else:
+                    if reason in dropped: dropped[reason]+=1
+        except Exception as e:
+            print(f"[euronext] fetch error {u}: {e}", file=sys.stderr)
             continue
+
+    print(f"[euronext] items={total} kept={kept} dropped={dropped} samples={sample_seen}")
     if not evts:
-        print("[euronext] no candidates"); return 0
+        print("[euronext] no candidates")
+        return 0
+
     with OUT.open("a", encoding="utf-8") as f:
-        for e in evts: f.write(json.dumps(e)+"\n")
+        for e in evts:
+            f.write(json.dumps(e)+"\n")
     print(f"[euronext] wrote {len(evts)} events -> {OUT}")
     return 0
 
