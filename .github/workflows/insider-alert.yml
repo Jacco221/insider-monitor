@@ -1,7 +1,8 @@
 name: insider-alert
 on:
   schedule:
-    - cron: "*/30 * * * *"      # elke 30 minuten
+    - cron: "*/30 * * * *"          # elke 30 minuten
+    - cron: "*/10 10-20 * * 1-5"    # ma–vr, 10:00–20:59 UTC (12–22 NL) vaker
   workflow_dispatch:
 
 jobs:
@@ -19,20 +20,24 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install twilio
+          pip install twilio beautifulsoup4 requests
+
+      - name: Prepare folders
+        run: mkdir -p data/reports data/state
 
       - name: Fetch SEC Form 4
         env:
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
         run: python3 scripts/fetch_insiders_sec.py
 
+      - name: Fetch UK RNS (Directors' dealings)
+        run: python3 scripts/fetch_rns_mt.py
+
+      - name: Fetch Euronext Managers' Transactions
+        run: python3 scripts/fetch_euronext_mt.py
+
       - name: Rank SEC events
-        run: |
-          if [ -f scripts/prioritize_sec.py ]; then
-            python3 scripts/prioritize_sec.py
-          else
-            echo "[rank] missing prioritize_sec.py; using raw SEC headlines"
-          fi
+        run: python3 scripts/prioritize_sec.py
 
       - name: Compose latest from SEC first
         run: python3 scripts/compose_latest_sec_first.py
