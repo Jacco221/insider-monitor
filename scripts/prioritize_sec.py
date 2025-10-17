@@ -21,6 +21,15 @@ def role_bucket(role:str)->str:
     if "officer" in r or "dir" in r: return "OFF"
     return "OTHER"
 
+import os
+def _envf(n,d):
+    try: return float(os.getenv(n,'').replace('_',''))
+    except: return d
+
+TH_TOP_NET_SELL    = _envf('SEC_THRESH_TOP_NET_SELL',    750_000)
+TH_OFF_NET_SELL    = _envf('SEC_THRESH_OFF_NET_SELL',  1_000_000)
+TH_OTHER_NET_SELL  = _envf('SEC_THRESH_OTHER_NET_SELL',2_000_000)
+
 def role_weight(role:str)->float:
     b=role_bucket(role)
     return 3.0 if b=="TOP" else (2.0 if b=="OFF" else 1.0)
@@ -30,6 +39,23 @@ def human(v):
     return f"${v/1_000_000:.2f}M" if v>=1_000_000 else (f"${v/1_000:.0f}k" if v>=1_000 else f"${v:.0f}")
 
 def load_events():
+    evts=[]
+    for pth in (SECJ, EUJ):
+        if pth.exists():
+            for line in pth.read_text(encoding='utf-8').splitlines():
+                if line.strip():
+                    try: evts.append(json.loads(line))
+                    except: pass
+    return evts
+
+def dedup_events(evts):
+    seen=set(); out=[]
+    for e in evts:
+        k = e.get('acc') or (e.get('ticker'), e.get('who'), e.get('when'))
+        if k in seen: continue
+        seen.add(k); out.append(e)
+    return out
+
     evts=[]
     for p in (SECJ, EUJ):
         if p.exists():
@@ -72,22 +98,38 @@ def score_events(evts):
     ranked.sort(key=lambda x:x[0], reverse=True)
     return ranked
 
+
+
 def build_line(e):
-    who=e.get("who","Insider")
-    tkr=(e.get("ticker") or e.get("issuer") or "UNKNOWN").upper()
-    role=e.get("role","Insider")
-    when=(e.get("when","") or "").replace("T"," ").replace("Z"," UTC")
-    buy=float(e.get("buy",0.0)); sell=float(e.get("sell",0.0)); m=float(e.get("m",0.0)); f=float(e.get("f",0.0))
+    src = str(e.get("source","SEC")).upper()
+    if src == "RNS":
+        label = "[EU-RNS]"
+    elif src == "EURONEXT":
+        label = "[EU-EURONEXT]"
+    else:
+        label = "[SEC]"
+
+    who  = e.get("who","Insider")
+    tkr  = (e.get("ticker") or e.get("issuer") or "UNKNOWN").upper()
+    role = e.get("role","Insider")
+    when = (e.get("when","") or "").replace("T"," ").replace("Z"," UTC")
+
+    buy = float(e.get("buy",0.0)); sell=float(e.get("sell",0.0)); m=float(e.get("m",0.0)); f=float(e.get("f",0.0))
+    net = max(0.0, sell - (m+f))
+
+    def human(v):
+        v = float(v)
+        return f"${v/1_000_000:.2f}M" if v>=1_000_000 else (f"${v/1_000:.0f}k" if v>=1_000 else f"${v:.0f}")
+
     parts=[]
-    if buy:  parts.append(f"BUY {human(buy)}")
-    if sell: parts.append(f"SELL {human(sell)}")
-    if m:    parts.append(f"M {human(m)}")
-    if f:    parts.append(f"F {human(f)}")
-    body=", ".join(parts) if parts else "Form 4 filed"
-    return f"- [SEC] {tkr} – {who} ({role}): {body} ({when})"
+    if buy: parts.append(f"BUY {human(buy)}")
+    if net>0: parts.append(f"🔻 NET SELL {human(net)}")  # i.p.v. SELL + M/F apart
+    body = ", ".join(parts) if parts else "Form 4 filed"
+    return f"- {label} {tkr} – {who} ({role}): {body} ({when})"
+
 
 def main():
-    evts=load_events()
+    evts=dedup_events(load_events())
     if not evts:
         if RAW.exists():
             RANKED.write_text(RAW.read_text(encoding="utf-8"), encoding="utf-8")
