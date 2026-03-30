@@ -52,8 +52,8 @@ python3 scripts/portfolio_monitor.py \
   --output-dir "$LOGDIR" \
   --telegram 2>&1
 
-# Stap 4: Auto-trade (voert trades uit op basis van signalen)
-echo "[4/4] Auto-trade..."
-python3 scripts/auto_trade.py --execute --max-order 500 --max-daily 2000 2>&1
+# Stap 4: Auto-trade ADVIES (dry-run, wacht op Telegram bevestiging)
+echo "[4/4] Trade advies genereren..."
+python3 scripts/auto_trade.py --dry-run --max-order 500 --max-daily 2000 2>&1
 
 echo "=== Done: $(date) ==="
