@@ -18,8 +18,8 @@ set -e
 
 cd /Users/jaccoalbers/insider-monitor
 
-# Laad env vars
-source ~/.zshrc 2>/dev/null || source ~/.bash_profile 2>/dev/null || true
+# Laad credentials uit beveiligd .env bestand
+source /Users/jaccoalbers/insider-monitor/.env 2>/dev/null || true
 
 # Gebruik Python 3.12 venv
 source .venv/bin/activate

@@ -4,6 +4,9 @@
 # Python venv
 .venv/
 
+# Credentials (NOOIT committen)
+.env
+
 # Editor/backup
 *.save
 *.bak
