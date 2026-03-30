@@ -1,36 +1,25 @@
 #!/usr/bin/env python3
-"""DEGIRO order suggesties en uitvoering (v3 API). Orders worden NOOIT automatisch geplaatst."""
+"""DEGIRO order suggesties en uitvoering (v3.0.35). Orders NOOIT automatisch zonder bevestiging."""
 
 from __future__ import annotations
-
 
 import os
 import sys
 
 from degiro_connector.trading.api import API as TradingAPI
-from degiro_connector.trading.models.trading_pb2 import Order
-
+from degiro_connector.trading.models.order import Action, Order, OrderType, TimeType
 
 DEFAULT_MAX_ORDER_EUR = 500
 
 
 def suggest_orders(to_buy: list[dict], product_map: dict, max_order_eur: float | None = None) -> list[dict]:
-    """Genereer order suggesties op basis van insider signals.
-
-    Args:
-        to_buy: lijst uit portfolio.compare_with_signals()['to_buy']
-        product_map: {ticker: product_info} uit ticker_map.resolve_tickers()
-        max_order_eur: maximaal bedrag per order
-
-    Returns: lijst van order suggesties (nog NIET geplaatst)
-    """
+    """Genereer order suggesties op basis van insider signals."""
     max_eur = max_order_eur or float(os.getenv("DEGIRO_MAX_ORDER_EUR", str(DEFAULT_MAX_ORDER_EUR)))
 
     suggestions = []
     for signal in to_buy:
         ticker = signal["ticker"]
         product = product_map.get(ticker)
-
         if not product or not product.get("product_id"):
             continue
 
@@ -49,14 +38,10 @@ def suggest_orders(to_buy: list[dict], product_map: dict, max_order_eur: float |
     return suggestions
 
 
-def preview_order(api: TradingAPI, product_id: int, amount_eur: float, action: str = "BUY") -> dict:
-    """Preview een order via DEGIRO's check_order. Plaatst NIETS.
+def preview_order(api: TradingAPI, product_id: int, amount_eur: float, action_str: str = "BUY") -> dict:
+    """Preview een order via DEGIRO's check_order. Plaatst NIETS."""
+    buy_sell = Action.BUY if action_str.upper() == "BUY" else Action.SELL
 
-    Returns: order details incl. geschatte kosten, of foutmelding.
-    """
-    buy_sell = Order.Action.Value("BUY") if action.upper() == "BUY" else Order.Action.Value("SELL")
-
-    # Haal product prijs op voor size berekening
     try:
         info = api.get_products_info(product_list=[product_id], raw=True)
         product_data = info.get("data", {}).get(str(product_id), {})
@@ -66,17 +51,16 @@ def preview_order(api: TradingAPI, product_id: int, amount_eur: float, action: s
         return {"error": f"Kan productprijs niet ophalen: {e}"}
 
     if close_price <= 0:
-        return {"error": f"Geen geldige prijs beschikbaar voor product {product_id}"}
+        return {"error": f"Geen geldige prijs voor product {product_id}"}
 
-    # Bereken aantal shares
     size = max(1, int(amount_eur / close_price))
 
     order = Order(
         action=buy_sell,
-        order_type=Order.OrderType.Value("MARKET"),
+        order_type=OrderType.MARKET,
         product_id=product_id,
         size=size,
-        time_type=Order.TimeType.Value("GOOD_TILL_DAY"),
+        time_type=TimeType.GOOD_TILL_DAY,
     )
 
     try:
@@ -89,7 +73,7 @@ def preview_order(api: TradingAPI, product_id: int, amount_eur: float, action: s
     return {
         "product_id": product_id,
         "name": name,
-        "action": action.upper(),
+        "action": action_str.upper(),
         "size": size,
         "estimated_price": close_price,
         "estimated_total": round(close_price * size, 2),
@@ -99,16 +83,12 @@ def preview_order(api: TradingAPI, product_id: int, amount_eur: float, action: s
 
 
 def execute_order(api: TradingAPI, preview: dict) -> dict:
-    """Voer een order uit. ALLEEN aanroepen na expliciete gebruikersbevestiging.
-
-    Args:
-        preview: resultaat van preview_order() met confirmation_id en _order
-    """
+    """Voer een order uit. ALLEEN na expliciete gebruikersbevestiging."""
     confirmation_id = preview.get("confirmation_id")
     order = preview.get("_order")
 
     if not confirmation_id or not order:
-        return {"error": "Geen geldige preview/confirmation beschikbaar"}
+        return {"error": "Geen geldige preview/confirmation"}
 
     try:
         result = api.confirm_order(
