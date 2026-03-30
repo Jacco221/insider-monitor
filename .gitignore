@@ -6,11 +6,15 @@
 
 # Editor/backup
 *.save
+*.bak
+*.bak_*
 
-# Onze pipeline artefacten
+# Pipeline artefacten
 data/reports/*.csv
 data/reports/*.json
-Crypto analyse tool - Crypto marktindicatoren uitleg_files/
+data/state/*.disabled
+data/state/degiro_session.json
+data/state/degiro_ticker_cache.json
 
 # generated reports
 /data/reports/latest.txt
