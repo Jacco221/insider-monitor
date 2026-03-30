@@ -43,7 +43,10 @@ def get_portfolio(api: TradingAPI) -> list[dict]:
             elif name == "product":
                 pos["name"] = value
 
-        if pos.get("product_id") and pos.get("size", 0) != 0:
+        pid = pos.get("product_id")
+        size = pos.get("size", 0)
+        if pid and str(pid).isdigit() and isinstance(size, (int, float)) and size != 0:
+            pos["product_id"] = int(pid)
             positions.append(pos)
 
     return positions

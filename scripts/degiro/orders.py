@@ -56,7 +56,7 @@ def preview_order(api: TradingAPI, product_id: int, amount_eur: float, action_st
     size = max(1, int(amount_eur / close_price))
 
     order = Order(
-        action=buy_sell,
+        buy_sell=buy_sell,
         order_type=OrderType.MARKET,
         product_id=product_id,
         size=size,

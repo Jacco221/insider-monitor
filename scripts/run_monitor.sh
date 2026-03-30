@@ -45,11 +45,15 @@ python3 scripts/portfolio_deepdive_270d.py \
   --days 270 --count 80 --output-dir "$LOGDIR" 2>&1 | tail -20
 
 # Stap 3: Portfolio monitor met exit-signalen
-echo "[3/3] Portfolio monitor..."
+echo "[3/4] Portfolio monitor..."
 python3 scripts/portfolio_monitor.py \
   --tickers $PORTFOLIO $WATCHLIST \
   --days 270 \
   --output-dir "$LOGDIR" \
   --telegram 2>&1
+
+# Stap 4: Auto-trade (voert trades uit op basis van signalen)
+echo "[4/4] Auto-trade..."
+python3 scripts/auto_trade.py --execute --max-order 500 --max-daily 2000 2>&1
 
 echo "=== Done: $(date) ==="
