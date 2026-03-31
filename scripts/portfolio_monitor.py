@@ -54,6 +54,29 @@ ROLE_WEIGHTS = {
 }
 
 
+IPO_MIN_DAYS = 365  # Bedrijf moet minimaal 1 jaar genoteerd zijn
+
+
+def is_recent_ipo(filing_data: dict) -> bool:
+    """Check of een bedrijf recent naar de beurs is gegaan (< IPO_MIN_DAYS).
+
+    Kijkt naar de oudste Form 4 filing — als die minder dan 1 jaar oud is,
+    is het waarschijnlijk een recente IPO en zijn insider buys minder informatief.
+    """
+    recent = filing_data.get("filings", {}).get("recent", {})
+    dates = recent.get("filingDate", [])
+    if not dates:
+        return True  # Geen data = voorzichtig, behandel als IPO
+
+    try:
+        oldest = min(dates)
+        oldest_date = datetime.strptime(oldest, "%Y-%m-%d").date()
+        days_listed = (datetime.now(timezone.utc).date() - oldest_date).days
+        return days_listed < IPO_MIN_DAYS
+    except Exception:
+        return False
+
+
 def fetch(url: str) -> str:
     for i in range(RETRIES):
         try:
@@ -151,6 +174,19 @@ def analyze_ticker(ticker: str, days: int, ticker_map: dict) -> dict:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date()
 
         subs = fetch_json(SUBMISSIONS_URL.format(cik=cik))
+
+        # IPO check
+        if is_recent_ipo(subs):
+            return {
+                "ticker": ticker, "signal": "HOLD", "reasons": [f"Recente IPO (<{IPO_MIN_DAYS}d) — insider buys minder informatief"],
+                "total_buy": 0, "total_sell": 0, "net_flow": 0, "weighted_net": 0,
+                "days_since_buy": 999, "unique_buyers": 0, "unique_sellers": 0,
+                "csuite_buyers": [], "csuite_sellers": [],
+                "last_buy_date": None, "last_sell_date": None,
+                "buys_detail": [], "sells_detail": [],
+                "is_ipo": True,
+            }
+
         recent = subs.get("filings", {}).get("recent", {})
         n = len(recent.get("accessionNumber", []))
 
