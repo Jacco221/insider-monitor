@@ -45,11 +45,15 @@ def fetch_xml(index_url):
         html = r.text
 
         matches = re.findall(r'href="([^"]+\.xml)"', html)
-        for m in matches:
+        # Sorteer: skip xsl-transformed versies, prefer raw XML
+        raw_matches = [m for m in matches if "/xsl" not in m.lower()]
+        xsl_matches = [m for m in matches if "/xsl" in m.lower()]
+        for m in raw_matches + xsl_matches:
             if "form4" in m.lower() or "ownership" in m.lower() or "primary" in m.lower():
                 xml_url = m if m.startswith("http") else "https://www.sec.gov" + m
                 xr = requests.get(xml_url, headers=HEADERS, timeout=30)
-                return xr.text
+                if "ownershipDocument" in xr.text or "transactionCode" in xr.text:
+                    return xr.text
     except requests.RequestException as e:
         print(f"[warn] fetch_xml fout voor {index_url}: {e}", file=sys.stderr)
         return None
