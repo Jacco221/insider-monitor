@@ -204,26 +204,43 @@ def extract_meta(xml: str) -> dict:
 
 IPO_CACHE: dict[str, bool] = {}
 IPO_CACHE_LOCK = threading.Lock()
+IPO_MIN_DAYS = 365  # Bedrijf moet minimaal 1 jaar genoteerd zijn
 
 
-def is_recent_ipo(ticker: str) -> bool:
-    """True als ticker minder dan 1 jaar geleden genoteerd (recente IPO)."""
-    if not ticker:
+def is_recent_ipo(cik: str) -> bool:
+    """True als bedrijf minder dan 1 jaar geleden genoteerd (recente IPO).
+
+    Gebruikt de SEC submissions API op basis van CIK — betrouwbaarder dan
+    EFTS full-text search op tickersymbool (die false positives geeft voor
+    veel bestaande bedrijven zoals LULU, NKE etc.).
+    """
+    if not cik:
         return False
     with IPO_CACHE_LOCK:
-        if ticker in IPO_CACHE:
-            return IPO_CACHE[ticker]
+        if cik in IPO_CACHE:
+            return IPO_CACHE[cik]
     try:
-        url = (f"https://efts.sec.gov/LATEST/search-index?forms=4"
-               f"&dateRange=custom&startdt=2000-01-01&enddt=2020-01-01"
-               f"&q=%22{ticker}%22&hits.hits._source.size=1")
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        has_old = r.status_code == 200 and r.json().get("hits", {}).get("total", {}).get("value", 0) > 0
-        result  = not has_old
+        cik_padded = cik.zfill(10)
+        url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
+        r = requests.get(url, headers={"User-Agent": UA, "Accept": "application/json"}, timeout=10)
+        if r.status_code != 200:
+            # Bij fout: voorzichtig, behandel NIET als IPO (liever false positive dan missen)
+            result = False
+        else:
+            data = r.json()
+            dates = data.get("filings", {}).get("recent", {}).get("filingDate", [])
+            if not dates:
+                result = True  # Geen filings = onbekend, wees voorzichtig
+            else:
+                from datetime import date as _date
+                oldest = min(dates)
+                oldest_date = _date.fromisoformat(oldest)
+                days_listed = (_date.today() - oldest_date).days
+                result = days_listed < IPO_MIN_DAYS
     except Exception:
-        result = False
+        result = False  # Bij fout: doorgaan, niet filteren
     with IPO_CACHE_LOCK:
-        IPO_CACHE[ticker] = result
+        IPO_CACHE[cik] = result
     return result
 
 
@@ -243,9 +260,10 @@ def process_filing(filing: dict) -> list[dict]:
             continue
 
         ticker = meta["ticker"]
+        cik    = filing["cik"]
 
-        if is_recent_ipo(ticker):
-            print(f"[skip] {ticker} — recente IPO, geen informatief signaal", file=sys.stderr)
+        if is_recent_ipo(cik):
+            print(f"[skip] {ticker} — recente IPO (<{IPO_MIN_DAYS}d), geen informatief signaal", file=sys.stderr)
             continue
 
         if (meta.get("isTenPercentOwner") == "1"
