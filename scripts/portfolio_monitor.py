@@ -760,7 +760,9 @@ def main():
                 sig_emoji = score_emoji(pos_score)
                 adv_emoji = ADVIES_EMOJI.get(r.get("advies", ""), "")
                 tg_message += f"{sig_emoji} <b>{r['ticker']}</b> — {r['signal']} [{pos_score}/10]\n"
-                tg_message += f"  Netto: ${r['net_flow']:,.0f} | {r['days_since_buy']}d geleden\n"
+                raw_flow = r['net_flow']
+                flow_str = f"${raw_flow:,.0f}" if abs(raw_flow) < 1_000_000_000 else "⚠️ data-fout"
+                tg_message += f"  Netto: {flow_str} | {r['days_since_buy']}d geleden\n"
                 if r.get("reasons"):
                     tg_message += f"  ↳ {r['reasons'][0]}\n"
                 tg_message += f"  {adv_emoji} <b>{r.get('advies', '?')}</b>\n\n"
@@ -779,7 +781,9 @@ def main():
                     cand_score = score_position(r)
                     sig_emoji = score_emoji(cand_score)
                     tg_message += f"{sig_emoji} <b>{r['ticker']}</b> — {r['signal']} [{cand_score}/10]\n"
-                    tg_message += f"  Netto: ${r['net_flow']:,.0f} | {r['days_since_buy']}d geleden\n"
+                    raw_flow = r['net_flow']
+                    flow_str = f"${raw_flow:,.0f}" if abs(raw_flow) < 1_000_000_000 else "⚠️ data-fout"
+                    tg_message += f"  Netto: {flow_str} | {r['days_since_buy']}d geleden\n"
                     if r.get("reasons"):
                         tg_message += f"  ↳ {r['reasons'][0]}\n"
                     if r["signal"] in ("STERKE OVERTUIGING", "POSITIEF SIGNAAL"):

@@ -278,20 +278,32 @@ def _is_csuite(role: str) -> bool:
     return any(kw in role_l for kw in CSUITE_ROLES)
 
 
+def score_emoji(score: int) -> str:
+    """Emoji op basis van score (1-10) — zelfde schaal als portfolio_monitor.py."""
+    if score >= 9:  return "🟢🟢🟢"
+    if score >= 8:  return "🟢🟢"
+    if score >= 6:  return "🟢"
+    if score >= 4:  return "🟡"
+    if score >= 2:  return "🟠"
+    return "🔴"
+
+
 def score_candidate(
     ticker: str,
     insider_data: dict,
     market_data: dict,
 ) -> tuple[int, list[str]]:
     """
-    Score 1-10 voor een nieuwe kandidaat. Herziene schaal (max ruwe score = 13):
-      9-10 : CEO koopt >1% marktcap binnen 7d, cluster, nul sells
-      7-8  : C-suite, vers, significante buy als % marktcap
-      5-6  : C-suite of significante buy, maar minder vers of kleiner
-      3-4  : Positief zonder C-suite of marktcap-data
+    Score 1-10 voor een nieuwe kandidaat. Zelfde formule als score_position()
+    in portfolio_monitor.py (max ruwe score = 12) zodat scores consistent zijn.
+
+      9-10 : CEO koopt $5M+ binnen 7d, groot cluster, nul sells
+      7-8  : Sterke overtuiging, vers, significante buy
+      5-6  : Positief signaal, minder vers of kleiner
+      3-4  : Positief zonder C-suite of verouderd
       1-2  : Zwak signaal
 
-    Ruwe punten genormaliseerd naar 1-10 (max raw = 13).
+    Ruwe punten genormaliseerd naar 1-10 (max raw = 12).
     """
     raw    = 0
     redenen: list[str] = []
@@ -299,18 +311,37 @@ def score_candidate(
     buys_detail   = insider_data.get("buys_detail", [])
     sells_detail  = insider_data.get("sells_detail", [])
     total_buy     = insider_data.get("total_buy", 0.0)
+    total_sell    = insider_data.get("total_sell", 0.0)
     unique_buyers = insider_data.get("unique_buyers", 0)
     csuite_buyers = insider_data.get("csuite_buyers", [])
     days_since    = insider_data.get("days_since_buy", 999)
     market_cap    = market_data.get("market_cap")
 
-    # ── C-suite koper (max 2) ─────────────────────────────────────────────────
-    csuite_in_detail = [b for b in buys_detail if _is_csuite(b.get("role", ""))]
-    all_csuite = list({b["insider"] for b in csuite_in_detail} | set(csuite_buyers))
-
-    if all_csuite:
+    # ── Signaalsterkte (max 3) — afgeleid van buy/sell verhouding ─────────────
+    if total_buy > 0 and total_sell < total_buy * 0.2:
+        raw += 3
+        redenen.append("Sterke overtuiging: buys domineren")
+    elif total_buy > 0 and total_buy >= total_sell:
         raw += 2
-        redenen.append(f"C-suite koper(s): {', '.join(all_csuite[:3])}")
+        redenen.append("Positief signaal: meer buys dan sells")
+    elif total_buy > 0:
+        raw += 1
+        redenen.append("Gemengd signaal: buys én sells aanwezig")
+
+    # ── C-suite koper (max 2, min -3) ─────────────────────────────────────────
+    csuite_in_detail = [b for b in buys_detail if _is_csuite(b.get("role", ""))]
+    csuite_sellers_d = [b for b in sells_detail if _is_csuite(b.get("role", ""))]
+    all_csuite_buy   = list({b["insider"] for b in csuite_in_detail} | set(csuite_buyers))
+    all_csuite_sell  = [b["insider"] for b in csuite_sellers_d]
+
+    if all_csuite_buy and not all_csuite_sell:
+        raw += 2
+        redenen.append(f"C-suite koper(s): {', '.join(all_csuite_buy[:3])}")
+    elif all_csuite_buy and all_csuite_sell:
+        redenen.append("C-suite koopt én verkoopt — gemengd")
+    elif all_csuite_sell:
+        raw -= 3
+        redenen.append(f"C-suite verkoopt: {', '.join(all_csuite_sell[:2])}")
 
     # ── Versheid (max 3) ──────────────────────────────────────────────────────
     if days_since <= 7:
@@ -323,51 +354,35 @@ def score_candidate(
         raw += 1
         redenen.append(f"Recent signaal: {days_since}d geleden")
 
-    # ── Insider buy als % van marktcap (max 4) ────────────────────────────────
-    if market_cap and market_cap > 0 and total_buy > 0:
-        pct = total_buy / market_cap * 100
-        if pct >= 1.0:
-            raw += 4
-            redenen.append(f"Uitzonderlijke buy: {pct:.2f}% van marktcap")
-        elif pct >= 0.5:
-            raw += 3
-            redenen.append(f"Grote buy: {pct:.2f}% van marktcap")
-        elif pct >= 0.1:
-            raw += 2
-            redenen.append(f"Significante buy: {pct:.2f}% van marktcap")
-        elif pct >= 0.01:
-            raw += 1
-            redenen.append(f"Insider buy: {pct:.2f}% van marktcap")
-    elif total_buy > 0:
-        # Geen marktcap — gebruik absoluut bedrag als proxy
-        if total_buy >= 5_000_000:
-            raw += 3
-            redenen.append(f"Grote absolute buy: ${total_buy/1e6:.1f}M")
-        elif total_buy >= 1_000_000:
-            raw += 2
-            redenen.append(f"Significante buy: ${total_buy/1e6:.1f}M")
-        elif total_buy >= 100_000:
-            raw += 1
-            redenen.append(f"Buy: ${total_buy:,.0f}")
-
-    # ── Cluster ≥ 3 kopers (max 2) ────────────────────────────────────────────
-    if unique_buyers >= 5:
-        raw += 2
-        redenen.append(f"Groot cluster: {unique_buyers} unieke insiders")
-    elif unique_buyers >= 3:
+    # ── Cluster ≥ 3 kopers ≤ 30d (max 1) ─────────────────────────────────────
+    if unique_buyers >= 3 and days_since <= 30:
         raw += 1
         redenen.append(f"Koop-cluster: {unique_buyers} unieke insiders")
 
-    # ── Geen sells (max 2) ────────────────────────────────────────────────────
-    if not sells_detail:
-        raw += 2
-        redenen.append("Geen insider sells")
-    elif len(sells_detail) <= 1:
-        raw += 1
-        redenen.append("Nauwelijks insider sells")
+    # ── Koopomvang (max 2) — marktcap% indien beschikbaar, anders absoluut ────
+    if market_cap and market_cap > 0 and total_buy > 0:
+        pct = total_buy / market_cap * 100
+        if pct >= 1.0:
+            raw += 2
+            redenen.append(f"Grote buy: {pct:.2f}% van marktcap")
+        elif pct >= 0.1:
+            raw += 1
+            redenen.append(f"Significante buy: {pct:.2f}% van marktcap")
+    elif total_buy > 0:
+        if total_buy >= 5_000_000:
+            raw += 2
+            redenen.append(f"Grote absolute buy: ${total_buy/1e6:.1f}M")
+        elif total_buy >= 1_000_000:
+            raw += 1
+            redenen.append(f"Significante buy: ${total_buy/1e6:.1f}M")
 
-    # Normaliseer naar 1-10 (max ruwe score = 13)
-    score = round(max(0, raw) / 13 * 10)
+    # ── Netto positief (max 1) ────────────────────────────────────────────────
+    if total_buy > total_sell and not all_csuite_sell:
+        raw += 1
+        redenen.append("Netto koopdruk")
+
+    # Normaliseer naar 1-10 (max ruwe score = 12)
+    score = round(max(0, raw) / 12 * 10)
     return max(0, min(10, score)), redenen
 
 
@@ -489,21 +504,14 @@ def format_telegram_message(
     if portfolio_positions:
         lines.append("")
         lines.append("<b>⚖️ Vergelijking met portfolio:</b>")
-        sig_emoji = {
-            "STERKE OVERTUIGING": "🟢🟢",
-            "POSITIEF SIGNAAL":   "🟢",
-            "GEMENGD SIGNAAL":    "🟡",
-            "NEGATIEF SIGNAAL":   "🟠",
-            "SIGNAAL UITGEWERKT": "🔴",
-        }
         # Kandidaat bovenaan
         lines.append(f"  {'★':2} {ticker:<6} score {score}/10  ← kandidaat")
         for p in sorted(portfolio_positions, key=lambda x: x["pos_score"], reverse=True):
             pt  = p.get("ticker", "?")
             ps  = p.get("pos_score", 0)
-            sig = sig_emoji.get(p.get("signal", ""), "⚪")
+            emo = score_emoji(ps)
             better = "✅ zwakker" if ps < score else ("➡️ gelijk" if ps == score else "⬆️ sterker")
-            lines.append(f"  {sig} {pt:<6} score {ps}/10  {better}")
+            lines.append(f"  {emo} {pt:<6} score {ps}/10  {better}")
 
     # ── Advies en herbalancering ───────────────────────────────────────────────
     lines.append("")
