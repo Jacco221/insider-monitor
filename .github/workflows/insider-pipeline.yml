@@ -1,114 +1,58 @@
-name: Insider Monitor Pipeline
+name: Insider Monitor
 
 on:
-  workflow_dispatch: {}   # Handmatig triggeren vanuit GitHub UI
+  workflow_dispatch: {}              # Handmatig triggeren vanuit GitHub UI
   schedule:
-    - cron: "0 7 * * 1-5"    # 09:00 CEST (07:00 UTC) — ma t/m vr
-    - cron: "0 16 * * 1-5"   # 18:00 CEST (16:00 UTC) — ma t/m vr
+    - cron: "0 7 * * 1-5"           # 09:00 CEST (07:00 UTC) ma–vr
+    - cron: "0 16 * * 1-5"          # 18:00 CEST (16:00 UTC) ma–vr
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 35
 
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
       SEC_USER_AGENT:     ${{ secrets.SEC_USER_AGENT }}
-      PORTFOLIO:          "BH NKE IPX SBSW"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Python 3.12 instellen
+      - name: Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Dependencies installeren
-        run: |
-          pip install --upgrade pip
-          pip install requests python-dateutil
+      - name: Dependencies
+        run: pip install requests yfinance
 
-      - name: Directories aanmaken
-        run: mkdir -p data/reports data/state
+      - name: Directories
+        run: mkdir -p data/reports
 
-      # ── Stap 1: Discovery ────────────────────────────────────────────────
-      # Verse IP in GitHub Actions = geen SEC rate limit problemen
-      - name: Discovery — nieuwe Form 4 insider buys
+      # ── Stap 1: Monitor (discovery + analyse + Telegram) ─────────────────
+      - name: Monitor
         run: |
-          echo "[1/4] Discovery scan (vers IP, geen rate limit)..."
-          python scripts/discovery_3bd_openmarket_ps100k.py \
-            --output-dir data/reports \
-            --days 3 \
-            --workers 3 \
-            --delay 0.2
-        continue-on-error: true
-
-      # ── Stap 2: Deep dive ────────────────────────────────────────────────
-      - name: Discovery tickers extraheren
-        run: |
-          DISCOVERY=$(python3 -c "
-          import json, os
-          try:
-              data = json.load(open('data/reports/discovery_openmarket.json'))
-              tickers = sorted(set(r['ticker'] for r in data if r.get('ticker')))
-              print(' '.join(tickers))
-          except:
-              print('')
-          " 2>/dev/null)
-          ALL_TICKERS=$(python3 -c "
-          portfolio = '${{ env.PORTFOLIO }}'.split()
-          discovery = '$DISCOVERY'.split()
-          combined = sorted(set(portfolio + [t for t in discovery if t]))
-          print(' '.join(combined))
-          ")
-          echo "DISCOVERY_TICKERS=$DISCOVERY" >> $GITHUB_ENV
-          echo "ALL_TICKERS=$ALL_TICKERS"     >> $GITHUB_ENV
-          echo "Portfolio: ${{ env.PORTFOLIO }}"
-          echo "Discovery: $DISCOVERY"
-          echo "Totaal:    $ALL_TICKERS"
-
-      - name: Deep dive 270d
-        run: |
-          echo "[2/4] Deep dive op $ALL_TICKERS..."
-          python scripts/portfolio_deepdive_270d.py \
-            --tickers $ALL_TICKERS \
-            --days 270 --count 80 \
-            --output-dir data/reports
-        continue-on-error: true
-        timeout-minutes: 15
-
-      # ── Stap 3: Portfolio monitor + Telegram ─────────────────────────────
-      - name: Portfolio monitor
-        run: |
-          echo "[3/4] Portfolio monitor..."
-          python scripts/portfolio_monitor.py \
-            --tickers $ALL_TICKERS \
-            --portfolio ${{ env.PORTFOLIO }} \
-            --days 270 \
+          python3 scripts/monitor.py \
+            --portfolio BH NKE IPX SBSW \
             --output-dir data/reports \
             --telegram
 
-      # ── Stap 4: Kandidaat research op sterke signalen ────────────────────
+      # ── Stap 2: Diepgaande kandidaat research ────────────────────────────
       - name: Kandidaat research
         run: |
-          echo "[4/4] Kandidaat research..."
-          python scripts/candidate_research.py \
-            --monitor-json data/reports/portfolio_monitor.json \
-            --portfolio ${{ env.PORTFOLIO }} \
+          python3 scripts/candidate_research.py \
+            --monitor-json data/reports/monitor.json \
+            --portfolio BH NKE IPX SBSW \
             --telegram
         continue-on-error: true
 
-      # ── Artifacts bewaren voor debugging ────────────────────────────────
-      - name: Reports uploaden
+      # ── Reports bewaren voor debugging ───────────────────────────────────
+      - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: insider-reports-${{ github.run_id }}
+          name: reports-${{ github.run_id }}
           retention-days: 7
-          path: |
-            data/reports/*.json
-            data/reports/*.csv
-            data/reports/*.log
+          path: data/reports/
