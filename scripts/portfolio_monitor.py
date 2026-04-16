@@ -456,6 +456,15 @@ SIGNAL_EMOJI = {
     "UNKNOWN":            "⚪",
 }
 
+def score_emoji(score: int) -> str:
+    """Emoji op basis van score (1-10) — consistenter dan signaal-emoji."""
+    if score >= 9:  return "🟢🟢🟢"
+    if score >= 8:  return "🟢🟢"
+    if score >= 6:  return "🟢"
+    if score >= 4:  return "🟡"
+    if score >= 2:  return "🟠"
+    return "🔴"
+
 # Advies voor een bestaande portefeuille-positie op basis van het signaal
 SIGNAL_ADVIES = {
     "STERKE OVERTUIGING": "AANHOUDEN",
@@ -747,9 +756,9 @@ def main():
             # ── Sectie 1: Jouw portefeuille ──────────────────────────────────
             tg_message += "<b>💼 PORTEFEUILLE</b>\n"
             for r in portfolio_results:
-                sig_emoji = SIGNAL_EMOJI.get(r["signal"], "⚪")
-                adv_emoji = ADVIES_EMOJI.get(r.get("advies", ""), "")
                 pos_score = score_position(r)
+                sig_emoji = score_emoji(pos_score)
+                adv_emoji = ADVIES_EMOJI.get(r.get("advies", ""), "")
                 tg_message += f"{sig_emoji} <b>{r['ticker']}</b> — {r['signal']} [{pos_score}/10]\n"
                 tg_message += f"  Netto: ${r['net_flow']:,.0f} | {r['days_since_buy']}d geleden\n"
                 if r.get("reasons"):
@@ -767,8 +776,8 @@ def main():
             tg_message += "<b>🔍 TOP 3 KANDIDATEN</b>\n"
             if top_kandidaten:
                 for r in top_kandidaten:
-                    sig_emoji = SIGNAL_EMOJI.get(r["signal"], "⚪")
                     cand_score = score_position(r)
+                    sig_emoji = score_emoji(cand_score)
                     tg_message += f"{sig_emoji} <b>{r['ticker']}</b> — {r['signal']} [{cand_score}/10]\n"
                     tg_message += f"  Netto: ${r['net_flow']:,.0f} | {r['days_since_buy']}d geleden\n"
                     if r.get("reasons"):
