@@ -60,17 +60,25 @@ IGNORE_SELL_CODES = {"F", "A", "M", "G", "W", "J", "C", "D", "L", "Z"}
 
 # ── HTTP ──────────────────────────────────────────────────────────────────────
 
-_req_lock = threading.Lock()
-_rate_limited = threading.Event()
+_rate_lock    = threading.Lock()
+_last_request = 0.0          # Tijdstip van de laatste request (voor throttling)
 
 
-def _fetch(url: str) -> str:
-    """GET met retry, rate limiting en backoff. Thread-safe."""
-    if _rate_limited.is_set():
-        return ""
-    with _req_lock:
-        time.sleep(REQUEST_DELAY)
-    for attempt in range(HTTP_RETRIES):
+def _fetch(url: str, retries: int = HTTP_RETRIES) -> str:
+    """GET met retry, rate limiting en backoff. Thread-safe.
+
+    Rate limiting: globaal minimaal REQUEST_DELAY seconden tussen requests,
+    maar threads blokkeren elkaar NIET tijdens de sleep — echte parallelism.
+    """
+    global _last_request
+    with _rate_lock:
+        now  = time.time()
+        wait = REQUEST_DELAY - (now - _last_request)
+        if wait > 0:
+            time.sleep(wait)
+        _last_request = time.time()
+
+    for attempt in range(retries):
         try:
             req = Request(url, headers={"User-Agent": UA, "Accept": "*/*"})
             with urlopen(req, timeout=HTTP_TIMEOUT) as r:
@@ -81,8 +89,10 @@ def _fetch(url: str) -> str:
                 wait = 20 * (attempt + 1)
                 print(f"[warn] 429 rate limit — wacht {wait}s", file=sys.stderr)
                 time.sleep(wait)
-            elif attempt < HTTP_RETRIES - 1:
-                time.sleep(min(10, 1.5 ** attempt))
+            elif code == 404:
+                return ""   # 404 = bestand bestaat niet, niet opnieuw proberen
+            elif attempt < retries - 1:
+                time.sleep(min(8, 1.5 ** attempt))
     return ""
 
 
@@ -310,17 +320,20 @@ def _is_csuite(role: str) -> bool:
 
 # ── 270d ticker analyse ───────────────────────────────────────────────────────
 
+MAX_FORM4_PER_TICKER = 60   # Cap op XML-fetches per ticker — voorkomt timeout bij actieve bedrijven
+
+
 def analyse_ticker(ticker: str, cik: str, days: int = ANALYSIS_DAYS) -> dict:
     """
     Haal 270d Form 4-history op via SEC submissions API en bereken signaal.
 
-    Geeft dict terug met alle velden die nodig zijn voor scoring en Telegram.
+    Gebruikt de BEDRIJFS-CIK (issuer) zodat alle insider filings gevonden worden.
+    Cap op MAX_FORM4_PER_TICKER fetches zodat één ticker de pipeline niet blokkeert.
     """
     ticker = ticker.upper()
     cik_p  = cik.zfill(10)
     cutoff = date.today() - timedelta(days=days)
 
-    # Submissions JSON bevat lijst van recente filings + verwijzingen naar archiefpagina's
     subs = _fetch_json(f"https://data.sec.gov/submissions/CIK{cik_p}.json")
     if not subs:
         return _empty(ticker, "SEC submissions niet bereikbaar")
@@ -330,12 +343,15 @@ def analyse_ticker(ticker: str, cik: str, days: int = ANALYSIS_DAYS) -> dict:
     buys:  list[dict] = []
     sells: list[dict] = []
 
-    acc_numbers   = recent.get("accessionNumber", [])
-    filing_dates  = recent.get("filingDate", [])
-    form_types    = recent.get("form", [])
-    primary_docs  = recent.get("primaryDocument", [])
+    acc_numbers  = recent.get("accessionNumber", [])
+    filing_dates = recent.get("filingDate", [])
+    form_types   = recent.get("form", [])
+    primary_docs = recent.get("primaryDocument", [])
 
+    fetched = 0
     for i, acc in enumerate(acc_numbers):
+        if fetched >= MAX_FORM4_PER_TICKER:
+            break
         if form_types[i] not in ("4", "4/A"):
             continue
         try:
@@ -345,40 +361,40 @@ def analyse_ticker(ticker: str, cik: str, days: int = ANALYSIS_DAYS) -> dict:
         if filing_date < cutoff:
             continue
 
-        # Bouw XML-URL direct vanuit primaryDocument (geen index-pagina nodig)
         acc_clean = acc.replace("-", "")
         prim_doc  = primary_docs[i] if i < len(primary_docs) else ""
         xml = ""
 
+        # Probeer primaryDocument eerst (1 request), daarna fallbacks
         if prim_doc:
             xml = _fetch(f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_clean}/{prim_doc}")
         if not xml or "ownershipDocument" not in xml:
-            # Fallbacks
             for alt in [f"{acc_clean}.xml", "form4.xml", "primarydocument.xml"]:
+                if alt == prim_doc:
+                    continue
                 xml = _fetch(f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_clean}/{alt}")
                 if xml and "ownershipDocument" in xml:
                     break
 
+        fetched += 1
         if not xml:
             continue
 
-        meta = _parse_meta(xml)
+        meta  = _parse_meta(xml)
         owner = meta.get("owner", "Unknown")
         role  = meta.get("role", "")
 
         for tx in _parse_transactions(xml):
             code   = tx["code"]
             amount = tx["amount"]
-            tx_date = filing_date  # gebruik filing date als transactiedatum ontbreekt
+            tx_date = filing_date
             if tx.get("date"):
                 try:
                     tx_date = date.fromisoformat(tx["date"])
                 except ValueError:
                     pass
 
-            if code == "P" and amount >= MIN_BUY_ANALYSIS:
-                if amount > MAX_BUY_USD:
-                    continue  # ADS-sanity cap
+            if code == "P" and MIN_BUY_ANALYSIS <= amount <= MAX_BUY_USD:
                 buys.append({"insider": owner, "role": role, "amount": amount, "date": tx_date})
             elif code == "S" and code not in IGNORE_SELL_CODES and amount > 0:
                 sells.append({"insider": owner, "role": role, "amount": amount, "date": tx_date})
@@ -763,23 +779,26 @@ def main():
         except Exception:
             pass
 
-    # Stap 2: CIK lookup voor portfolio tickers (die niet al in discovery zitten)
-    print("[monitor] Stap 2: CIK lookup voor portefeuille-tickers...", file=sys.stderr)
-    portfolio_without_cik = portfolio_set - disc_by_ticker.keys()
-    cik_map: dict[str, str] = {}
-    if portfolio_without_cik:
-        cik_map = load_cik_map()
+    # Stap 2: Bedrijfs-CIK lookup voor ALLE tickers via company_tickers.json
+    # Let op: disc_by_ticker["cik"] = insider-CIK (reporting owner) — NIET de bedrijfs-CIK!
+    # Voor 270d analyse hebben we de bedrijfs-CIK (issuer) nodig.
+    print("[monitor] Stap 2: bedrijfs-CIK lookup voor alle tickers...", file=sys.stderr)
+    cik_map = load_cik_map()
 
-    # Bouw volledige ticker → CIK map
+    # Bepaal welke tickers we analyseren:
+    # - Altijd: portfolio tickers
+    # - Discovery: top MAX_DISCOVERY_ANALYSE kandidaten op bedrag (niet alle 22+)
+    MAX_DISCOVERY_ANALYSE = 12
+    top_disc = sorted(disc_by_ticker.keys(),
+                      key=lambda t: -disc_by_ticker[t]["amount"])[:MAX_DISCOVERY_ANALYSE]
+    analyse_tickers = portfolio_set | set(top_disc)
+
     all_tickers_cik: dict[str, str] = {}
-    for t, info in disc_by_ticker.items():
-        all_tickers_cik[t] = info["cik"]
-    for t in portfolio_set:
-        if t not in all_tickers_cik:
-            if t in cik_map:
-                all_tickers_cik[t] = cik_map[t]
-            else:
-                print(f"[warn] {t}: CIK niet gevonden — overgeslagen", file=sys.stderr)
+    for t in analyse_tickers:
+        if t in cik_map:
+            all_tickers_cik[t] = cik_map[t]
+        else:
+            print(f"[warn] {t}: bedrijfs-CIK niet gevonden — overgeslagen", file=sys.stderr)
 
     # Stap 3: 270d analyse voor alle tickers (portfolio + discovery)
     print(f"[monitor] Stap 3: 270d analyse van {len(all_tickers_cik)} tickers...", file=sys.stderr)
