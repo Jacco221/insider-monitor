@@ -35,7 +35,7 @@ jobs:
       - name: Monitor
         run: |
           python3 scripts/monitor.py \
-            --portfolio BH NKE IPX SBSW \
+            --portfolio BH NKE IPX \
             --output-dir data/reports \
             --telegram
 
@@ -44,7 +44,7 @@ jobs:
         run: |
           python3 scripts/candidate_research.py \
             --monitor-json data/reports/monitor.json \
-            --portfolio BH NKE IPX SBSW \
+            --portfolio BH NKE IPX \
             --telegram
         continue-on-error: true
 

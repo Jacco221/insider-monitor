@@ -11,8 +11,8 @@ Doelen:
   4. Stuur Telegram met scores, advies en systeem-status
 
 Gebruik:
-  python3 scripts/monitor.py --portfolio BH NKE IPX SBSW --telegram
-  python3 scripts/monitor.py --portfolio BH NKE IPX SBSW          # console only
+  python3 scripts/monitor.py --portfolio BH NKE IPX --telegram
+  python3 scripts/monitor.py --portfolio BH NKE IPX               # console only
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 DISCOVERY_DAYS   = 5          # Lookback discovery: 5d vangt weekenden + SEC-vertraging
 ANALYSIS_DAYS    = 270        # Lookback voor signaalanalyse (Lakonishok & Lee: 6-9 mnd)
 MIN_BUY_USD      = 100_000    # Minimaal aankoopbedrag voor discovery
-MAX_BUY_USD      = 200_000_000 # Sanity cap: erboven = ADS-structuurfout (SVRE-bug)
+MAX_BUY_USD      = 20_000_000  # Sanity cap: erboven = ADS-structuurfout (SVRE $148M-bug)
 MIN_BUY_ANALYSIS = 50_000     # Minimaal aankoopbedrag voor 270d analyse
 IPO_MIN_DAYS     = 365        # Bedrijf minimaal 1 jaar genoteerd
 DECAY_HALFLIFE   = 90         # Half-life tijdsdecay in dagen (Lakonishok & Lee 2001)
@@ -67,16 +67,16 @@ _last_request = 0.0          # Tijdstip van de laatste request (voor throttling)
 def _fetch(url: str, retries: int = HTTP_RETRIES) -> str:
     """GET met retry, rate limiting en backoff. Thread-safe.
 
-    Rate limiting: globaal minimaal REQUEST_DELAY seconden tussen requests,
-    maar threads blokkeren elkaar NIET tijdens de sleep — echte parallelism.
+    Rate limiting: globaal minimaal REQUEST_DELAY seconden tussen requests.
+    Sleep gebeurt BUITEN het lock zodat threads echt parallel draaien.
     """
     global _last_request
     with _rate_lock:
-        now  = time.time()
-        wait = REQUEST_DELAY - (now - _last_request)
-        if wait > 0:
-            time.sleep(wait)
-        _last_request = time.time()
+        now       = time.time()
+        sleep_for = max(0.0, REQUEST_DELAY - (now - _last_request))
+        _last_request = now + sleep_for   # claim dit slot vooruit
+    if sleep_for > 0:
+        time.sleep(sleep_for)
 
     for attempt in range(retries):
         try:
@@ -348,6 +348,14 @@ def analyse_ticker(ticker: str, cik: str, days: int = ANALYSIS_DAYS) -> dict:
     form_types   = recent.get("form", [])
     primary_docs = recent.get("primaryDocument", [])
 
+    n_form4_in_window = sum(
+        1 for i, ft in enumerate(form_types)
+        if ft in ("4", "4/A") and i < len(filing_dates)
+        and filing_dates[i] >= cutoff.isoformat()
+    )
+    print(f"[analyse] {ticker} CIK={int(cik)} — {len(acc_numbers)} recent filings, "
+          f"{n_form4_in_window} Form 4 in {days}d venster", file=sys.stderr)
+
     fetched = 0
     for i, acc in enumerate(acc_numbers):
         if fetched >= MAX_FORM4_PER_TICKER:
@@ -363,6 +371,10 @@ def analyse_ticker(ticker: str, cik: str, days: int = ANALYSIS_DAYS) -> dict:
 
         acc_clean = acc.replace("-", "")
         prim_doc  = primary_docs[i] if i < len(primary_docs) else ""
+        # SEC submissions JSON bevat soms een XSLT-renderer prefix (bijv. "xslF345X05/filename.xml")
+        # Strip de directory-prefix zodat we het echte XML-bestand ophalen
+        if prim_doc and "/" in prim_doc:
+            prim_doc = prim_doc.split("/")[-1]
         xml = ""
 
         # Probeer primaryDocument eerst (1 request), daarna fallbacks
@@ -398,6 +410,70 @@ def analyse_ticker(ticker: str, cik: str, days: int = ANALYSIS_DAYS) -> dict:
                 buys.append({"insider": owner, "role": role, "amount": amount, "date": tx_date})
             elif code == "S" and code not in IGNORE_SELL_CODES and amount > 0:
                 sells.append({"insider": owner, "role": role, "amount": amount, "date": tx_date})
+
+    # Als de recent-sectie geen Form 4s heeft, probeer archived filings
+    if n_form4_in_window == 0 and fetched == 0:
+        archive_files = subs.get("filings", {}).get("files", [])
+        for af in archive_files[:3]:   # Max 3 archive files checken (elk = honderden filings)
+            af_name = af.get("name", "")
+            if not af_name:
+                continue
+            af_data = _fetch_json(f"https://data.sec.gov/submissions/{af_name}")
+            if not af_data:
+                continue
+            af_acc   = af_data.get("accessionNumber", [])
+            af_dates = af_data.get("filingDate", [])
+            af_types = af_data.get("form", [])
+            af_docs  = af_data.get("primaryDocument", [])
+            for i, acc in enumerate(af_acc):
+                if fetched >= MAX_FORM4_PER_TICKER:
+                    break
+                if af_types[i] not in ("4", "4/A"):
+                    continue
+                try:
+                    filing_date = date.fromisoformat(af_dates[i])
+                except (ValueError, IndexError):
+                    continue
+                if filing_date < cutoff:
+                    break   # Archief is chronologisch, oudere filings volgen
+                acc_clean = acc.replace("-", "")
+                prim_doc  = af_docs[i] if i < len(af_docs) else ""
+                if prim_doc and "/" in prim_doc:
+                    prim_doc = prim_doc.split("/")[-1]
+                xml = ""
+                if prim_doc:
+                    xml = _fetch(f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_clean}/{prim_doc}")
+                if not xml or "ownershipDocument" not in xml:
+                    for alt in [f"{acc_clean}.xml", "form4.xml"]:
+                        if alt == prim_doc:
+                            continue
+                        xml = _fetch(f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_clean}/{alt}")
+                        if xml and "ownershipDocument" in xml:
+                            break
+                fetched += 1
+                if not xml:
+                    continue
+                meta  = _parse_meta(xml)
+                owner = meta.get("owner", "Unknown")
+                role  = meta.get("role", "")
+                for tx in _parse_transactions(xml):
+                    code   = tx["code"]
+                    amount = tx["amount"]
+                    tx_date = filing_date
+                    if tx.get("date"):
+                        try:
+                            tx_date = date.fromisoformat(tx["date"])
+                        except ValueError:
+                            pass
+                    if code == "P" and MIN_BUY_ANALYSIS <= amount <= MAX_BUY_USD:
+                        buys.append({"insider": owner, "role": role, "amount": amount, "date": tx_date})
+                    elif code == "S" and code not in IGNORE_SELL_CODES and amount > 0:
+                        sells.append({"insider": owner, "role": role, "amount": amount, "date": tx_date})
+        if fetched > 0:
+            print(f"[analyse] {ticker} — {fetched} archived Form 4s verwerkt", file=sys.stderr)
+
+    if not buys and not sells:
+        print(f"[analyse] {ticker} — geen buys/sells gevonden in {days}d (fetched={fetched})", file=sys.stderr)
 
     return _build_result(ticker, buys, sells)
 
