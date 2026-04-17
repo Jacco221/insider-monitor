@@ -105,9 +105,9 @@ def _fetch_json(url: str) -> dict | list:
 
 # Bekende Foreign Private Issuers die geen Form 4 hoeven in te dienen bij de SEC.
 # Worden getoond in portefeuille maar hebben altijd 0 Form 4-data.
-KNOWN_FPIS: dict[str, str] = {
-    "SBSW": "Sibanye Stillwater (Zuid-Afrika)",
-}
+# Let op: controleer altijd via SEC submissions of een bedrijf echt geen Form 4s indient
+# voor je het hier toevoegt. SBSW bijv. dient wel Form 4s in ondanks 20-F status.
+KNOWN_FPIS: dict[str, str] = {}
 
 
 def load_cik_map() -> dict[str, str]:
