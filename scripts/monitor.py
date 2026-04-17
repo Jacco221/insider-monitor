@@ -11,8 +11,8 @@ Doelen:
   4. Stuur Telegram met scores, advies en systeem-status
 
 Gebruik:
-  python3 scripts/monitor.py --portfolio BH NKE IPX --telegram
-  python3 scripts/monitor.py --portfolio BH NKE IPX               # console only
+  python3 scripts/monitor.py --portfolio BH NKE IPX SBSW --telegram
+  python3 scripts/monitor.py --portfolio BH NKE IPX SBSW          # console only
 """
 
 from __future__ import annotations
@@ -102,6 +102,13 @@ def _fetch_json(url: str) -> dict | list:
 
 
 # ── CIK lookup ────────────────────────────────────────────────────────────────
+
+# Bekende Foreign Private Issuers die geen Form 4 hoeven in te dienen bij de SEC.
+# Worden getoond in portefeuille maar hebben altijd 0 Form 4-data.
+KNOWN_FPIS: dict[str, str] = {
+    "SBSW": "Sibanye Stillwater (Zuid-Afrika)",
+}
+
 
 def load_cik_map() -> dict[str, str]:
     """Laad ticker→CIK van SEC. Returns {} bij fout (non-fataal)."""
@@ -690,6 +697,11 @@ def build_telegram(
     # ── Portefeuille ─────────────────────────────────────────────────────────
     msg += "<b>💼 PORTEFEUILLE</b>\n"
     for r in portfolio:
+        # FPI: aparte opmaak, geen score
+        if r.get("signal") == "FPI":
+            msg += f"⚪ <b>{r['ticker']}</b> — FPI (geen Form 4-data)\n"
+            msg += f"  ↳ {r['reasons'][0]}\n\n"
+            continue
         s    = score(r)
         emo  = score_emoji(s)
         adv  = ADVIES_EMOJI.get(r.get("advies", ""), "")
@@ -871,6 +883,9 @@ def main():
 
     all_tickers_cik: dict[str, str] = {}
     for t in analyse_tickers:
+        if t in KNOWN_FPIS:
+            print(f"[info] {t}: FPI ({KNOWN_FPIS[t]}) — geen Form 4-plicht, overgeslagen", file=sys.stderr)
+            continue
         if t in cik_map:
             all_tickers_cik[t] = cik_map[t]
         else:
@@ -898,6 +913,19 @@ def main():
                 print(f"[monitor] {ticker}: {r['signal']} [{s}/10] — {r['reasons'][0] if r['reasons'] else ''}", file=sys.stderr)
             except Exception as e:
                 print(f"[warn] {ticker}: analyse mislukt — {e}", file=sys.stderr)
+
+    # Voeg FPIs toe als portfolio-positie met eigen status
+    for t, name in KNOWN_FPIS.items():
+        if t in portfolio_set:
+            results[t] = {
+                "ticker": t, "signal": "FPI", "advies": "MONITOREN",
+                "reasons": [f"Foreign Private Issuer — geen Form 4-plicht ({name})"],
+                "total_buy": 0, "total_sell": 0, "net_flow": 0,
+                "days_since_buy": 999, "unique_buyers": 0,
+                "csuite_buyers": [], "csuite_sellers": [],
+                "buys_detail": [], "sells_detail": [],
+                "discovery": None, "in_portfolio": True,
+            }
 
     # Stap 4: Sorteer en splits
     portfolio_results = [r for r in results.values() if r.get("in_portfolio")]
