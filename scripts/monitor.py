@@ -320,9 +320,21 @@ def _parse_transactions(xml: str) -> list[dict]:
     return txs
 
 
+# Keywords die duiden op institutionele/activist kopers (hedge funds, PE, LP etc.)
+# Deze hebben een boardzetel maar kopen niet vanuit interne bedrijfskennis
+INSTITUTIONAL_KEYWORDS = {"partners", "management", "capital", "fund", " lp", ", lp",
+                          " llc", ", llc", " inc.", ", inc", "group", "holdings llc"}
+
+
 def _is_csuite(role: str) -> bool:
     r = role.lower()
     return any(k in r for k in CSUITE)
+
+
+def _is_institutional(name: str) -> bool:
+    """True als de insider een institutionele partij is (activist, hedge fund, PE)."""
+    n = name.lower()
+    return any(k in n for k in INSTITUTIONAL_KEYWORDS)
 
 
 # ── 270d ticker analyse ───────────────────────────────────────────────────────
@@ -518,8 +530,13 @@ def _build_result(ticker: str, buys: list, sells: list) -> dict:
     unique_buyers  = {b["insider"] for b in buys}
     unique_sellers = {s["insider"] for s in sells}
 
-    csuite_buyers  = {b["insider"] for b in buys  if _is_csuite(b["role"])}
-    csuite_sellers = {s["insider"] for s in sells if _is_csuite(s["role"])}
+    # Institutionele kopers (activists, hedge funds) tellen niet als C-suite —
+    # zij kopen vanuit externe druk, niet vanuit interne bedrijfskennis (Seyhun 1998)
+    csuite_buyers  = {b["insider"] for b in buys
+                      if _is_csuite(b["role"]) and not _is_institutional(b["insider"])}
+    csuite_sellers = {s["insider"] for s in sells
+                      if _is_csuite(s["role"]) and not _is_institutional(s["insider"])}
+    institutional_buyers = {b["insider"] for b in buys if _is_institutional(b["insider"])}
 
     recent_buyers = {b["insider"] for b in buys if (today - b["date"]).days <= 14}
 
@@ -541,6 +558,10 @@ def _build_result(ticker: str, buys: list, sells: list) -> dict:
     if csuite_buyers and days_since <= 30 and not csuite_sellers and net_flow > 0:
         signal = "STERKE OVERTUIGING"
         reasons.append(f"C-suite koper: {', '.join(list(csuite_buyers)[:2])}")
+
+    # Institutionele koper (activist/hedge fund): aparte vermelding, geen upgrade naar STERKE OVERTUIGING
+    if institutional_buyers and not csuite_buyers and days_since <= 30:
+        reasons.append(f"Institutionele koper: {', '.join(list(institutional_buyers)[:2])}")
 
     # Upgrade: cluster (≥3 unieke insiders binnen 14d)
     if len(recent_buyers) >= 3 and days_since <= 30:
@@ -593,6 +614,7 @@ def _build_result(ticker: str, buys: list, sells: list) -> dict:
         "unique_buyers": len(unique_buyers),
         "csuite_buyers": list(csuite_buyers),
         "csuite_sellers": list(csuite_sellers),
+        "institutional_buyers": list(institutional_buyers),
         "buys_detail":   detail(buys),
         "sells_detail":  detail(sells),
         "discovery":     None,  # wordt ingevuld door main()
@@ -617,30 +639,33 @@ def score(r: dict) -> int:
     Uniformele score 0-10 voor zowel portefeuille als kandidaten.
 
     Formule (max ruwe score = 12, genormaliseerd):
-      Signaalsterkte   : STERKE=3, POSITIEF=2, GEMENGD=1, anders=0
-      C-suite koper    : +2 (of -3 bij alleen C-suite sell)
-      Versheid         : ≤7d=+3, ≤14d=+2, ≤30d=+1
-      Cluster ≥3/14d   : +1
-      Koopomvang       : ≥$5M=+2, ≥$1M=+1
-      Netto positief   : +1
+      Signaalsterkte      : STERKE=3, POSITIEF=2, GEMENGD=1, anders=0
+      C-suite koper       : +2 (of -3 bij alleen C-suite sell)
+      Institutionele koper: +1 (activist/hedge fund — lagere informatiewaarde)
+      Versheid            : ≤7d=+3, ≤14d=+2, ≤30d=+1
+      Cluster ≥3/14d      : +1
+      Koopomvang          : ≥$5M=+2, ≥$1M=+1
+      Netto positief      : +1
 
     Literatuur: Seyhun (1998) — C-suite meest predictief
                 Lakonishok & Lee (2001) — cluster + recency sterkste combo
                 Cohen et al. (2012) — routine vs. opportunistische insider
     """
     raw = 0
-    sig       = r.get("signal", "UNKNOWN")
-    days      = r.get("days_since_buy", 999)
-    c_buyers  = r.get("csuite_buyers", [])
-    c_sellers = r.get("csuite_sellers", [])
-    n_buyers  = r.get("unique_buyers", 0)
-    total_buy = r.get("total_buy", 0)
-    net_flow  = r.get("net_flow", 0)
+    sig           = r.get("signal", "UNKNOWN")
+    days          = r.get("days_since_buy", 999)
+    c_buyers      = r.get("csuite_buyers", [])
+    c_sellers     = r.get("csuite_sellers", [])
+    inst_buyers   = r.get("institutional_buyers", [])
+    n_buyers      = r.get("unique_buyers", 0)
+    total_buy     = r.get("total_buy", 0)
+    net_flow      = r.get("net_flow", 0)
 
     raw += {"STERKE OVERTUIGING": 3, "POSITIEF SIGNAAL": 2, "GEMENGD SIGNAAL": 1}.get(sig, 0)
 
-    if c_buyers and not c_sellers:   raw += 2
-    elif c_sellers and not c_buyers: raw -= 3
+    if c_buyers and not c_sellers:       raw += 2
+    elif inst_buyers and not c_sellers:  raw += 1   # Institutioneel: halve bonus
+    elif c_sellers and not c_buyers:     raw -= 3
 
     if days <= 7:    raw += 3
     elif days <= 14: raw += 2
