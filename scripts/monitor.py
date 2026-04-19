@@ -11,8 +11,8 @@ Doelen:
   4. Stuur Telegram met scores, advies en systeem-status
 
 Gebruik:
-  python3 scripts/monitor.py --portfolio BH NKE IPX SBSW --telegram
-  python3 scripts/monitor.py --portfolio BH NKE IPX SBSW          # console only
+  python3 scripts/monitor.py --portfolio NKE IPX SBSW MESO --telegram
+  python3 scripts/monitor.py --portfolio NKE IPX SBSW MESO          # console only
 """
 
 from __future__ import annotations

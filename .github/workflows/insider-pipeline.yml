@@ -31,22 +31,13 @@ jobs:
       - name: Directories
         run: mkdir -p data/reports
 
-      # ── Stap 1: Monitor (discovery + analyse + Telegram) ─────────────────
+      # ── Monitor: discovery + 270d analyse + Telegram ─────────────────────
       - name: Monitor
         run: |
           python3 scripts/monitor.py \
-            --portfolio BH NKE IPX SBSW \
+            --portfolio NKE IPX SBSW MESO \
             --output-dir data/reports \
             --telegram
-
-      # ── Stap 2: Diepgaande kandidaat research ────────────────────────────
-      - name: Kandidaat research
-        run: |
-          python3 scripts/candidate_research.py \
-            --monitor-json data/reports/monitor.json \
-            --portfolio BH NKE IPX SBSW \
-            --telegram
-        continue-on-error: true
 
       # ── Reports bewaren voor debugging ───────────────────────────────────
       - name: Upload reports
